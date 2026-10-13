@@ -1455,7 +1455,7 @@ function generateCartela() {
     const values = shuffle(Array.from({ length: 15 }, (_, index) => first + index)).slice(0, 5).sort((a, b) => a - b);
     columns.push(values);
   }
-  const card = Array.from({ length: 5 }, (_, row) => columns.flatMap((column) => column[row]));
+  const card = Array.from({ length: 5 }, (_, row) => columns.flatMap((column) => column[row])).flat();
   card[12] = 'FREE';
   return card;
 }
