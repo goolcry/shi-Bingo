@@ -80,7 +80,7 @@ const pool = mysql.createPool({
 const cartelaPrice = '10.00';
 const roomMinPlayers = 2;
 const roomMaxPlayers = 20;
-const maxCartelasPerPlayer = 3;
+const maxCartelasPerPlayer = 2;
 
 let schemaPromise;
 function initializeSchema() {

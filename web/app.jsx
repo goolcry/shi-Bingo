@@ -19,9 +19,9 @@ const telegramWebApp = () => window.Telegram?.WebApp;
 const words = {
   en: {
     play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', settings: 'Settings', welcome: 'Play. Win. Enjoy!',
-    balance: 'Balance', refresh: 'Refresh', rooms: 'Available rooms', roomEmpty: 'No waiting rooms are open right now.',
+    balance: 'Balance', refresh: 'Refresh', rooms: 'Available room', roomEmpty: 'No waiting rooms are open right now.',
     retry: 'Retry', join: 'JOIN +', cards: 'Select cartelas', available: 'Available', selected: 'Yours',
-    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to three cartelas. Funds are charged only after the server confirms your selection.',
+    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to two cartelas. Funds are charged only after the server confirms your selection.',
     back: 'Back', game: 'Bingo game', recent: 'Recent calls', callBoard: 'Number board', leave: 'Leave room',
     noHistory: 'No game history yet.', noRanks: 'Rankings will appear after completed games.',
     deposit: 'Deposit', withdraw: 'Withdraw', share: 'Share invite', copy: 'Copy invite link',
@@ -33,7 +33,7 @@ const words = {
     play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
     balance: 'ቀሪ ሂሳብ', refresh: 'አድስ', rooms: 'ያሉ ክፍሎች', roomEmpty: 'አሁን የሚጠባበቅ ክፍል የለም።',
     retry: 'እንደገና ሞክር', join: 'ወደ ክፍል ግባ', cards: 'ካርቴላ ይምረጡ', available: 'ያለ', selected: 'የእርስዎ', taken: 'ተይዟል',
-    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሶስት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
+    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሁለት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
     back: 'ተመለስ', game: 'የቢንጎ ጨዋታ', recent: 'የቅርብ ጥሪዎች', callBoard: 'ቁጥር ሰሌዳ', leave: 'ከክፍሉ ውጣ',
     noHistory: 'ገና የጨዋታ ታሪክ የለም።', noRanks: 'ጨዋታዎች ሲጠናቀቁ ደረጃዎች ይታያሉ።',
     deposit: 'ገንዘብ አስገባ', withdraw: 'ገንዘብ አውጣ', share: 'ግብዣ አጋራ', copy: 'የግብዣ አገናኝ ቅዳ',
@@ -64,6 +64,7 @@ function App() {
   const [user, setUser] = useState(null);
   const [wallet, setWallet] = useState(null);
   const [rooms, setRooms] = useState([]);
+  const [roomsLoading, setRoomsLoading] = useState(true);
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
   const [game, setGame] = useState(null);
@@ -87,9 +88,14 @@ function App() {
   }, [request]);
 
   const refreshRooms = useCallback(async () => {
-    const data = await api('/api/rooms', { initData, allowAnonymous: true });
-    setRooms(data.rooms);
-    return data;
+    setRoomsLoading(true);
+    try {
+      const data = await api('/api/rooms', { initData, allowAnonymous: true });
+      setRooms(data.rooms);
+      return data;
+    } finally {
+      setRoomsLoading(false);
+    }
   }, [initData]);
 
   const loadRoom = useCallback(async (id) => {
@@ -258,7 +264,12 @@ function App() {
       await loadRoom(item.id);
       setError('');
     } catch (reason) {
-      setError(reason.message);
+      try {
+        await refreshRooms();
+        setError(reason.message);
+      } catch (refreshError) {
+        setError(`${reason.message} Room refresh failed: ${refreshError.message}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -320,10 +331,12 @@ function App() {
 
   return <div className="app-shell">
     <header className="topbar">
-      <div className="brand-mark"><span className="crown">♛</span><span>SHISHO <b>BINGO</b></span></div>
-      <div className="player-chip">{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</div>
+      <div className="brand-mark">
+        <span className="brand-icon" aria-hidden="true">👑</span>
+        <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</small></span>
+      </div>
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
-        💰 {wallet === null ? '—' : `${money(wallet)} BIRR`}
+        <span aria-hidden="true">💰</span> {wallet === null ? '—' : money(wallet)} <small>ETB</small>
       </button>
     </header>
 
@@ -340,7 +353,7 @@ function App() {
     </div>}
 
     <main className="content">
-      {view === 'play' && <PlayScreen t={t} rooms={rooms} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
+      {view === 'play' && <PlayScreen t={t} rooms={rooms} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
       {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={leaveRoom} />}
       {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
         setBusy(true);
@@ -357,7 +370,7 @@ function App() {
 
     {!['cartelas', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
       {[
-        ['play', '🎮', t.play], ['wallet', '💰', t.balance], ['history', '📜', t.history], ['profile', '⚙️', t.settings],
+        ['play', '🎮', t.play], ['ranks', '🏆', t.ranks], ['history', '📜', t.history], ['profile', '👤', t.profile],
       ].map(([id, icon, label]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => go(id)}>
         <span>{icon}</span>{label}
       </button>)}
@@ -366,32 +379,48 @@ function App() {
   </div>;
 }
 
-function PlayScreen({ t, rooms, onJoin, busy, onRefresh }) {
-  return <>
+function PlayScreen({ t, rooms, roomsLoading, onJoin, busy, onRefresh }) {
+  return <div className="play-screen">
     <section className="hero">
-      <div className="hero-copy"><div className="eyebrow">♛ PREMIUM BINGO</div><h1>SHISHO <b>BINGO</b></h1><p>{t.welcome}</p></div>
-      <div className="ball-ball ball-one">B<span>1</span></div><div className="ball-ball ball-two">O<span>73</span></div>
-      <div className="features"><span>🏆 Real-Time Bingo</span><span>👥 Multiple Rooms</span><span>👑 Exciting Winners</span><span>💰 Instant Rewards</span></div>
+      <div className="hero-crown" aria-hidden="true">👑</div>
+      <h1>SHISHO <b>BINGO</b></h1>
+      <p>{t.welcome}</p>
+      <div className="features">
+        <span>🏆 REAL-TIME</span><span>🎟️ MULTIPLE ROOMS</span><span>💰 INSTANT REWARDS</span>
+      </div>
     </section>
-    <section className="section-heading"><div><div className="eyebrow">LIVE LOBBY</div><h2>{t.rooms}</h2></div><button className="outline-button" onClick={onRefresh}>↻ {t.refresh}</button></section>
-    {rooms.length === 0
-      ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>New rooms will appear here when opened.</p><button className="outline-button" onClick={onRefresh}>{t.retry}</button></div>
+    <section className="section-heading"><h2 className="eyebrow">{t.rooms}</h2></section>
+    {roomsLoading && rooms.length === 0
+      ? <div className="empty panel" role="status"><span className="empty-icon">🎱</span><strong>{t.loading}</strong></div>
+      : rooms.length === 0
+      ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>New rooms will appear here when opened.</p><button className="outline-button" onClick={onRefresh}>↻ {t.retry}</button></div>
       : <div className="room-list">{rooms.map((room) => <article className="room-card panel" key={room.id}>
-        <div className="room-title"><div><span className="eyebrow">ROOM #{room.roomNumber || room.id}</span><h3>75-Ball Classic</h3><small className="muted">Starts with {room.minPlayers} players · Max {room.maxPlayers}</small></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status === 'WAITING' ? 'SELECTING' : room.status}</span></div>
-        <div className="room-stats">
-          <div><small>STAKE</small><b>{money(room.stake)} BIRR</b></div>
-          <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
-          <div><small>PRIZE POOL</small><b className="gold">{money(room.prizePool)} BIRR</b></div>
+        <div className="room-title">
+          <span className="room-emblem" aria-hidden="true">⑧</span>
+          <div className="room-description"><h3>Room #{room.roomNumber || room.id}</h3><small>75-Ball Classic · Max {room.maxPlayers} Players</small></div>
+          <button className="join-button" disabled={busy || room.status !== 'WAITING' || room.currentPlayers >= room.maxPlayers} onClick={() => onJoin(room)}>
+            {busy ? t.loading : 'JOIN +'}
+          </button>
         </div>
-        <button className="primary-button" disabled={busy || room.status !== 'WAITING' || room.currentPlayers >= room.maxPlayers} onClick={() => onJoin(room)}>
-          {busy ? t.loading : 'Enter Game'} <span>▶</span>
-        </button>
+        <div className="room-stats">
+          <div><b>{money(room.prizePool)}</b><small>POT BIRR</small></div>
+          <div><b>{room.currentPlayers}/{room.maxPlayers}</b><small>PLAYERS</small></div>
+          <div><b>{room.status}</b><small>STATUS</small></div>
+        </div>
       </article>)}</div>}
-    <section className="howto panel"><div className="eyebrow">🎁 PLAY SMART</div><h2>Pick. Play. Win.</h2>
-      <p className="muted">Choose up to 3 cartelas. Each cartela costs 10.00 BIRR.</p>
-      <p className="muted">{t.rules} Prizes are paid from the room pool after server validation.</p>
+    <section className="play-smart panel">
+      <div><h2>🎁 PLAY SMART</h2><p>Choose up to 2 cartelas. Each cartela costs 10 BIRR.</p></div>
+      <span aria-hidden="true">🎟️</span>
     </section>
-  </>;
+    <section className="how-to">
+      <h2 className="eyebrow">HOW TO PLAY</h2>
+      <div className="how-to-card panel">
+        <div><b>1</b><span>Pick a room</span></div>
+        <div><b>2</b><span>Choose cards</span></div>
+        <div><b>3</b><span>Auto-mark &amp; win</span></div>
+      </div>
+    </section>
+  </div>;
 }
 
 function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
@@ -402,7 +431,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
     <section className="section-heading"><div><div className="eyebrow">ROOM #{room.roomNumber || room.id}</div><h2>{t.cards}</h2></div><span className="status status-waiting">{room.status}</span></section>
     <div className="panel cartela-summary">
       <div><small>{t.available}</small><b>{cards.filter((card) => card.state === 'AVAILABLE').length}/100</b></div>
-      <div><small>{t.count}</small><b>{mine.length}/3</b></div>
+      <div><small>{t.count}</small><b>{mine.length}/2</b></div>
       <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
       <div><small>{t.balance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
     </div>
@@ -416,7 +445,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
       onClick={() => onToggle(card)}
     >{card.number}</button>)}</div>
     <div className="sticky-summary panel">
-      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/3</small>
+      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/2</small>
         <b>{t.total}: {money(room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString())} BIRR</b>
       </div>
       <span className="muted">Remaining · {room.selection?.remainingBalance == null ? (wallet === null ? '—' : money(wallet)) : money(room.selection.remainingBalance)} BIRR</span>
@@ -647,6 +676,57 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:9;display:grid;grid-template-columns:repeat(4,1fr);width:min(100%,760px);padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:#0c0614f2;border-top:1px solid #3b294d;backdrop-filter:blur(12px)}.bottom-nav button{display:grid;justify-items:center;gap:2px;border:0;background:transparent;color:#998ba9;font-size:10px}.bottom-nav button span{font-size:18px}.bottom-nav button.active{color:var(--gold)}
 .page-title{margin:8px 0 18px;font-size:25px}.rank-list,.history-list{display:grid;gap:9px}.rank-row{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:8px;padding:13px}.rank-position{color:var(--gold);font-weight:900}.rank-row>span:nth-of-type(2){grid-column:2}.rank-row b{grid-column:3;grid-row:1 / span 2;color:var(--gold);font-size:11px}.history-item{padding:14px}.history-item p{margin:8px 0}.row{display:flex;justify-content:space-between;gap:8px}.profile-card,.wallet-panel{display:grid;justify-items:center;padding:20px;margin-bottom:13px;text-align:center}.avatar{display:grid;place-items:center;width:60px;height:60px;border:2px solid var(--gold);border-radius:50%;background:#30203e;color:var(--gold);font-size:27px;font-weight:900}.profile-card h2{margin:9px 0 0}.profile-card>p{margin:2px}.profile-stats{display:grid;grid-template-columns:repeat(2,1fr);width:100%;gap:8px;margin:17px 0}.stat{display:grid;gap:4px;padding:11px;border:1px solid #382848;border-radius:10px;background:#140b1e}.stat b{font-size:12px}.settings{padding:15px}.settings .row{align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #352641}.language-control{display:flex;gap:5px}.wallet-panel{align-items:center;gap:9px}.wallet-panel>strong{font-size:28px;color:var(--gold)}.wallet-panel form{width:100%;text-align:left}.wallet-panel label{display:grid;gap:6px;margin:12px 0;color:var(--muted);font-size:12px}.wallet-panel input,.wallet-panel select{width:100%;padding:11px;border:1px solid #49365c;border-radius:9px;background:#0d0713;color:white}.payment-details{padding:10px;border-radius:9px;background:#120b1c;color:var(--gold);font-size:12px}.winner{text-align:center;padding:24px;margin-top:10px}.winner-crown{font-size:55px;color:var(--gold);text-shadow:0 0 24px #ffc40088;animation:crown 2s ease-in-out infinite}.winner h1{margin:5px;color:var(--gold);font-size:40px}.winner-row{display:grid;gap:4px;padding:12px;margin:10px 0;border:1px solid #49365c;border-radius:11px;background:#130b1b}.winner-row span{color:var(--muted);font-size:12px}.winner-row b{color:var(--gold)}.alert{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:10px 15px;padding:11px;border:1px solid #8d3238;border-radius:11px;background:#31141e;color:#ffc2c5;font-size:12px}.alert button{flex:none;border:1px solid #d47b7f;border-radius:8px;background:transparent;padding:6px;color:white}
 .cartela-mine{background:#22c55e;color:#041b0c;border-color:#86efac;box-shadow:0 0 13px #22c55e50}.legend .mine-dot{background:#22c55e}
+.app-shell{max-width:430px;min-height:100vh;min-height:100dvh;padding-bottom:calc(76px + env(safe-area-inset-bottom))}
+.topbar{gap:8px;padding:calc(7px + env(safe-area-inset-top)) 8px 7px;background:#08040fee;border-bottom-color:#21162b}
+.brand-mark{gap:7px;letter-spacing:.04em;font-size:10px}
+.brand-icon{display:grid;place-items:center;flex:none;width:32px;height:32px;border-radius:10px;background:linear-gradient(145deg,#ffe36a,#dba714);font-size:19px;box-shadow:0 2px 10px #dba71440}
+.brand-copy{display:grid;gap:1px}
+.brand-copy b{color:var(--gold);font-size:10px}
+.brand-copy small{color:#a99cb5;font-size:8px;font-weight:500;letter-spacing:0}
+.wallet-chip{display:flex;align-items:center;gap:5px;margin-left:auto;border-color:#493263;background:#160d21;padding:5px 9px;font-size:9px}
+.wallet-chip span{font-size:11px}.wallet-chip small{color:#a99cb5;font-size:8px;font-weight:600}
+.content{padding:9px 5px 20px}
+.play-screen{display:grid;gap:10px}
+.play-screen .hero{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;min-height:130px;padding:11px 8px 10px;border:1px solid #765723;border-radius:16px;background:radial-gradient(ellipse at 50% 0,#261337 0,transparent 76%),#100819;box-shadow:none;text-align:center}
+.hero-crown{height:32px;font-size:27px;line-height:32px;filter:drop-shadow(0 2px 4px #ffcb3280)}
+.play-screen .hero h1{margin:1px 0 3px;font-size:18px;line-height:1.15;letter-spacing:.005em}
+.play-screen .hero h1 b{color:var(--gold);text-shadow:none}
+.play-screen .hero p{font-size:9px;line-height:1.3}
+.play-screen .features{display:flex;justify-content:center;gap:5px;width:100%;margin:9px 0 0;padding:0;border:0;overflow:visible;font-size:7px;color:#e9def1}
+.play-screen .features span{flex:0 1 auto;min-width:0;padding:4px 6px;border:1px solid #45304f;border-radius:99px;white-space:nowrap;line-height:1}
+.play-screen .section-heading{margin:0;min-height:7px}
+.play-screen .section-heading h2{margin:0;color:#b898dc;font-size:8px;line-height:1.2;letter-spacing:.19em}
+.play-screen .room-list{grid-template-columns:minmax(0,1fr);gap:9px}
+.play-screen .room-card{padding:11px 12px;border-color:#765723;border-radius:17px;background:#100819;box-shadow:none}
+.play-screen .room-title{display:flex;justify-content:flex-start;gap:8px;min-width:0}
+.room-emblem{display:grid;place-items:center;flex:none;width:40px;height:40px;border:1px solid #6f5018;border-radius:12px;background:#1b1225;color:#f4e7cb;font-size:19px}
+.room-description{display:grid;align-content:center;gap:2px;flex:1;min-width:0}
+.play-screen .room-title h3{overflow:hidden;margin:0;color:#fff;font-size:11px;line-height:1.3;text-overflow:ellipsis;white-space:nowrap}
+.room-description small{overflow:hidden;color:#9d8fac;font-size:7px;line-height:1.3;text-overflow:ellipsis;white-space:nowrap}
+.join-button{flex:none;min-width:73px;min-height:37px;border:0;border-radius:11px;background:linear-gradient(110deg,#ffdc4c,#f2b91d);color:#251903;font-size:12px;font-weight:900;box-shadow:0 3px 10px #dcae1930}
+.play-screen .room-stats{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;margin:9px 0 0}
+.play-screen .room-stats div{display:flex;min-width:0;min-height:40px;flex-direction:column;align-items:center;justify-content:center;gap:1px;padding:4px 2px;border:1px solid #2c1e39;border-radius:9px;background:#0c0613;text-align:center}
+.play-screen .room-stats b{font-size:9px;line-height:1.25}
+.play-screen .room-stats small{font-size:7px;line-height:1.2;letter-spacing:.02em}
+.play-screen .empty{padding:16px 10px;border-radius:15px}
+.play-screen .empty strong{font-size:11px}
+.play-screen .empty p{font-size:9px}
+.play-screen .empty .outline-button{padding:6px 10px;font-size:10px}
+.play-smart{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:54px;margin:0;padding:8px 10px;border-color:#493263;border-radius:15px;background:#100819;box-shadow:none}
+.play-smart h2{margin:0 0 2px;color:var(--gold);font-size:9px;line-height:1.2}
+.play-smart p{margin:0;color:#a99cb5;font-size:7px;line-height:1.35}
+.play-smart>span{flex:none;color:#ee6568;font-size:20px}
+.how-to{display:grid;gap:6px}
+.how-to>h2{margin:0;color:#b898dc;font-size:8px;line-height:1.2;letter-spacing:.19em}
+.how-to-card{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;min-height:53px;padding:7px 5px;border-color:#493263;border-radius:15px;background:#100819;box-shadow:none}
+.how-to-card>div{display:flex;min-width:0;flex-direction:column;align-items:center;justify-content:center;gap:3px;text-align:center}
+.how-to-card b{display:grid;place-items:center;width:18px;height:18px;border-radius:3px;background:#9ac3d4;color:#122231;font-size:12px;line-height:1}
+.how-to-card span{color:#b5a8c0;font-size:7px;line-height:1.2;white-space:nowrap}
+.bottom-nav{left:50%;width:min(100%,430px);padding:6px 8px calc(6px + env(safe-area-inset-bottom));background:#090510f5;border-top-color:#21162b}
+.bottom-nav button{gap:1px;font-size:8px}
+.bottom-nav button span{font-size:17px}
+@media(max-width:370px){.content{padding-right:5px;padding-left:5px}.play-screen .features{gap:3px}.play-screen .features span{padding:4px 4px;font-size:6px}.room-description small{font-size:6.5px}.join-button{min-width:66px;font-size:11px}.how-to-card span{font-size:6px}}
+@media(min-width:600px){.app-shell{max-width:430px}.content{padding:10px 6px 20px}.hero-crown{height:32px}.play-screen .hero{min-height:130px;padding:11px 8px 10px}.play-screen .features{margin-top:9px}.play-screen .room-list{grid-template-columns:minmax(0,1fr)}.bottom-nav{width:min(100%,430px)}}
 @keyframes crown{50%{transform:translateY(-4px) rotate(3deg);text-shadow:0 0 34px #ffc400cc}}@keyframes pulse{50%{opacity:.55}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
 @media(min-width:600px){.content{padding:22px 24px 36px}.cartela-grid{grid-template-columns:repeat(10,minmax(0,1fr))}.cartela{font-size:15px}.hero{min-height:230px;padding:27px}.features{margin-top:32px}.room-list{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom-nav{border-radius:18px 18px 0 0}}
 `;
