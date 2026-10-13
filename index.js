@@ -26,7 +26,7 @@ const config = {
   webhookSecret: process.env.WEBHOOK_SECRET,
   setupSecret: process.env.SETUP_SECRET,
   appUrl: process.env.MINI_APP_URL.replace(/\/+$/, ''),
-  publicUrl: (process.env.PUBLIC_URL || process.env.MINI_APP_URL).replace(/\/+$/, ''),
+  publicUrl: (process.env.WEBHOOK_BASE_URL || process.env.MINI_APP_URL).replace(/\/+$/, ''),
   supportUsername: (process.env.SUPPORT_USERNAME || '').replace(/^@/, ''),
   channelUrl: process.env.SUPPORT_CHANNEL_URL || '',
   dbHost: process.env.DATABASE_HOST,
