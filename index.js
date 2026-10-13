@@ -7,18 +7,18 @@ const path = require('node:path');
 const express = require('express');
 const mysql = require('mysql2/promise');
 
-const requiredEnv = ['BOT_TOKEN', 'DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD', 'DATABASE_NAME', 'MINI_APP_URL', 'ADMIN_TELEGRAM_ID', 'WEBHOOK_SECRET', 'SETUP_SECRET'];
+const requiredEnv = ['BOT_TOKEN', 'DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD', 'DATABASE_NAME', 'MINI_APP_URL', 'ADMIN_TELEGRAM_ID', 'WEBHOOK_SECRET', 'SETUP_SECRET', 'CRON_SECRET'];
 const missingEnv = requiredEnv.filter((name) => !process.env[name]);
 if (missingEnv.length) {
   throw new Error(`Missing required environment variables: ${missingEnv.join(', ')}`);
 }
-for (const name of ['WEBHOOK_SECRET', 'SETUP_SECRET']) {
+for (const name of ['WEBHOOK_SECRET', 'SETUP_SECRET', 'CRON_SECRET']) {
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(process.env[name])) {
     throw new Error(`${name} must be a 32-256 character URL-safe secret. Generate one with crypto.randomBytes(32).toString('base64url').`);
   }
 }
-if (process.env.WEBHOOK_SECRET === process.env.SETUP_SECRET) {
-  throw new Error('WEBHOOK_SECRET and SETUP_SECRET must be different values.');
+if (new Set([process.env.WEBHOOK_SECRET, process.env.SETUP_SECRET, process.env.CRON_SECRET]).size !== 3) {
+  throw new Error('WEBHOOK_SECRET, SETUP_SECRET, and CRON_SECRET must be different values.');
 }
 
 function validConfiguredMoney(value) {
@@ -33,6 +33,7 @@ const config = {
   adminId: String(process.env.ADMIN_TELEGRAM_ID),
   webhookSecret: process.env.WEBHOOK_SECRET,
   setupSecret: process.env.SETUP_SECRET,
+  cronSecret: process.env.CRON_SECRET,
   appUrl: process.env.MINI_APP_URL.replace(/\/+$/, ''),
   publicUrl: (process.env.WEBHOOK_BASE_URL || process.env.MINI_APP_URL).replace(/\/+$/, ''),
   botUsername: (process.env.BOT_USERNAME || '').replace(/^@/, ''),
@@ -78,9 +79,10 @@ const pool = mysql.createPool({
   decimalNumbers: false,
 });
 const cartelaPrice = '10.00';
-const roomMinPlayers = 2;
+const roomMinPlayers = 3;
 const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
+const roomCountdownSeconds = 30;
 
 let schemaPromise;
 function initializeSchema() {
@@ -228,6 +230,8 @@ function initializeSchema() {
           created_by BIGINT UNSIGNED NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           started_at TIMESTAMP NULL,
+          selection_started_at TIMESTAMP NULL,
+          selection_deadline TIMESTAMP NULL,
           finished_at TIMESTAMP NULL,
           last_call_at TIMESTAMP NULL,
           KEY idx_room_status_created (status, created_at),
@@ -241,6 +245,29 @@ function initializeSchema() {
       if (creatorColumn[0]?.is_nullable === 'NO') {
         await pool.query('ALTER TABLE bingo_rooms MODIFY created_by BIGINT UNSIGNED NULL');
       }
+      const [countdownColumns] = await pool.execute(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'bingo_rooms'
+           AND column_name IN ('selection_started_at', 'selection_deadline')`,
+      );
+      const existingCountdownColumns = new Set(countdownColumns.map((column) => column.column_name));
+      if (!existingCountdownColumns.has('selection_started_at')) {
+        await pool.query('ALTER TABLE bingo_rooms ADD COLUMN selection_started_at TIMESTAMP NULL');
+      }
+      if (!existingCountdownColumns.has('selection_deadline')) {
+        await pool.query('ALTER TABLE bingo_rooms ADD COLUMN selection_deadline TIMESTAMP NULL');
+      }
+      await pool.query(
+        `UPDATE bingo_rooms SET
+           selection_started_at = COALESCE(selection_started_at, created_at),
+           selection_deadline = COALESCE(selection_deadline,
+             DATE_ADD(COALESCE(selection_started_at, created_at), INTERVAL ${roomCountdownSeconds} SECOND))
+         WHERE selection_started_at IS NULL OR selection_deadline IS NULL`,
+      );
+      await pool.execute(
+        "UPDATE bingo_rooms SET min_players = ? WHERE status = 'WAITING' AND min_players <> ?",
+        [roomMinPlayers, roomMinPlayers],
+      );
       await pool.query(`
         CREATE TABLE IF NOT EXISTS bingo_lobby_lock (
           id TINYINT UNSIGNED NOT NULL PRIMARY KEY
@@ -1479,8 +1506,9 @@ async function ensureOpenRoom(creatorTelegramId = null) {
       return String(available[0].id);
     }
     const [inserted] = await connection.execute(
-      `INSERT INTO bingo_rooms (room_number, stake, min_players, max_players, created_by)
-       VALUES ('pending', ?, ?, ?, ?)`,
+      `INSERT INTO bingo_rooms
+       (room_number, stake, min_players, max_players, created_by, selection_started_at, selection_deadline)
+       VALUES ('pending', ?, ?, ?, ?, CURRENT_TIMESTAMP, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ${roomCountdownSeconds} SECOND))`,
       [cartelaPrice, roomMinPlayers, roomMaxPlayers, creatorTelegramId ? String(creatorTelegramId) : null],
     );
     const roomId = String(inserted.insertId);
@@ -1517,12 +1545,43 @@ function parseCartela(value) {
   if (Array.isArray(parsed) && parsed.length === 5 && parsed.every((row) => Array.isArray(row) && row.length === 5)) {
     parsed = parsed.flat();
   }
-  if (!Array.isArray(parsed) || parsed.length !== 25
-    || parsed[12] !== 'FREE'
-    || parsed.some((value, index) => index !== 12 && (!Number.isInteger(Number(value)) || Number(value) < 1 || Number(value) > 75))) {
+  const validValues = Array.isArray(parsed) && parsed.length === 25
+    && parsed[12] === 'FREE'
+    && parsed.every((value, index) => {
+      if (index === 12) return true;
+      const number = Number(value);
+      const column = index % 5;
+      return Number.isInteger(number) && number >= column * 15 + 1 && number <= (column + 1) * 15;
+    })
+    && new Set(parsed.filter((value) => value !== 'FREE').map(Number)).size === 24;
+  if (!validValues) {
     throw Object.assign(new Error('Stored cartela data is invalid.'), { code: 'INVALID_CARTELA_DATA' });
   }
   return parsed;
+}
+
+async function countValidReservationOwners(connection, roomId) {
+  const [reservations] = await connection.execute(
+    `SELECT r.telegram_id, s.numbers
+     FROM cartela_reservations r
+     JOIN cartela_slots s ON s.room_id = r.room_id
+       AND s.cartela_number = r.cartela_number
+       AND s.owner_telegram_id = r.telegram_id
+     JOIN bingo_players p ON p.room_id = r.room_id
+       AND p.telegram_id = r.telegram_id AND p.left_at IS NULL
+     WHERE r.room_id = ? AND r.status = 'ACTIVE'`,
+    [roomId],
+  );
+  const validPlayers = new Set();
+  for (const reservation of reservations) {
+    try {
+      parseCartela(reservation.numbers);
+      validPlayers.add(String(reservation.telegram_id));
+    } catch (error) {
+      if (error.code !== 'INVALID_CARTELA_DATA') throw error;
+    }
+  }
+  return validPlayers.size;
 }
 
 async function repairRoomCartelas(connection, roomId) {
@@ -1700,8 +1759,78 @@ async function advanceRoomGame(roomId) {
   }
 }
 
+async function startDueRoom(roomId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[room]] = await connection.execute(
+      `SELECT status, min_players, selection_deadline,
+         selection_deadline <= CURRENT_TIMESTAMP AS is_due
+       FROM bingo_rooms WHERE id = ? FOR UPDATE`,
+      [roomId],
+    );
+    if (!room || room.status !== 'WAITING' || !Number(room.is_due)) {
+      await connection.commit();
+      return null;
+    }
+
+    const validPlayers = await countValidReservationOwners(connection, roomId);
+    if (validPlayers >= Number(room.min_players)) {
+      await connection.execute(
+        `UPDATE bingo_rooms SET status = 'PLAYING', started_at = CURRENT_TIMESTAMP,
+         last_call_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'WAITING'`,
+        [roomId],
+      );
+      await connection.commit();
+      return 'started';
+    }
+
+    await connection.execute(
+      `UPDATE bingo_rooms
+       SET selection_started_at = CURRENT_TIMESTAMP,
+           selection_deadline = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ${roomCountdownSeconds} SECOND)
+       WHERE id = ? AND status = 'WAITING'`,
+      [roomId],
+    );
+    await connection.commit();
+    return 'reopened';
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
+async function startDueRooms() {
+  await initializeSchema();
+  const [rooms] = await pool.execute(
+    `SELECT id FROM bingo_rooms
+     WHERE status = 'WAITING' AND selection_deadline <= CURRENT_TIMESTAMP
+     ORDER BY selection_deadline ASC LIMIT 100`,
+  );
+  const results = { started: [], reopened: 0 };
+  for (const { id } of rooms) {
+    const outcome = await startDueRoom(id);
+    if (outcome === 'started') {
+      const roomId = String(id);
+      results.started.push(roomId);
+      await advanceRoomGame(roomId);
+    } else if (outcome === 'reopened') {
+      results.reopened += 1;
+    }
+  }
+  return results;
+}
+
 async function roomSnapshot(roomId, telegramId) {
-  const [[room]] = await pool.execute('SELECT * FROM bingo_rooms WHERE id = ?', [roomId]);
+  const [[room]] = await pool.execute(
+    `SELECT *, UNIX_TIMESTAMP(selection_started_at) * 1000 AS selection_started_at_ms,
+       UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
+       UNIX_TIMESTAMP(CURRENT_TIMESTAMP) * 1000 AS server_now_ms
+     FROM bingo_rooms WHERE id = ?`,
+    [roomId],
+  );
   if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
   let [cards] = await pool.execute(
     `SELECT cartela_number, numbers, owner_telegram_id FROM cartela_slots
@@ -1749,6 +1878,7 @@ async function roomSnapshot(roomId, telegramId) {
      WHERE room_id = ? AND left_at IS NULL`,
     [roomId],
   );
+  const selectedPlayers = await countValidReservationOwners(pool, roomId);
   const [winners] = await pool.execute(
     `SELECT w.telegram_id, u.first_name, w.cartela_number, w.pattern, w.prize
      FROM game_winners w JOIN users u ON u.telegram_id = w.telegram_id
@@ -1782,8 +1912,15 @@ async function roomSnapshot(roomId, telegramId) {
       minPlayers: Number(room.min_players),
       maxPlayers: Number(room.max_players),
       currentPlayers: Number(players[0].count),
+      selectedPlayers,
       prizePool: formatAmount(room.prize_pool),
       status: room.status,
+      countdown: {
+        startedAt: Number(room.selection_started_at_ms),
+        deadline: Number(room.selection_deadline_ms),
+        serverNow: Number(room.server_now_ms),
+        durationSeconds: roomCountdownSeconds,
+      },
       selection: {
         count: Number(selection.count),
         totalCost: formatAmount(selection.total_cost),
@@ -1803,6 +1940,22 @@ async function roomSnapshot(roomId, telegramId) {
     },
   };
 }
+
+app.get('/api/cron/rooms', async (req, res, next) => {
+  const authorization = req.get('authorization') || '';
+  const expected = `Bearer ${config.cronSecret}`;
+  const providedBuffer = Buffer.from(authorization);
+  const expectedBuffer = Buffer.from(expected);
+  if (providedBuffer.length !== expectedBuffer.length || !crypto.timingSafeEqual(providedBuffer, expectedBuffer)) {
+    return res.status(401).json({ error: 'Unauthorized.' });
+  }
+  try {
+    const result = await startDueRooms();
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+});
 
 app.get('/health', async (_req, res) => {
   try {
@@ -1904,47 +2057,6 @@ app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next
   }
 });
 
-app.post('/api/rooms/:id/confirm-entry', authenticatedTelegramUser, async (req, res, next) => {
-  const connection = await pool.getConnection();
-  try {
-    await initializeSchema();
-    await connection.beginTransaction();
-    const [[room]] = await connection.execute(
-      'SELECT id, status FROM bingo_rooms WHERE id = ? FOR UPDATE',
-      [req.params.id],
-    );
-    if (!room) throw Object.assign(new Error('Room not found.'), { status: 404, code: 'ROOM_NOT_FOUND' });
-    if (!['WAITING', 'PLAYING'].includes(room.status)) {
-      throw Object.assign(new Error('This room is closed and cannot be entered.'), { status: 409, code: 'ROOM_CLOSED' });
-    }
-    const [players] = await connection.execute(
-      `SELECT 1 FROM bingo_players
-       WHERE room_id = ? AND telegram_id = ? AND left_at IS NULL FOR UPDATE`,
-      [room.id, String(req.telegramUser.id)],
-    );
-    if (!players.length) {
-      throw Object.assign(new Error('Join this room before confirming entry.'), { status: 403, code: 'NOT_A_ROOM_PLAYER' });
-    }
-    const [[selection]] = await connection.execute(
-      `SELECT COUNT(*) AS count FROM cartela_reservations
-       WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
-      [room.id, String(req.telegramUser.id)],
-    );
-    if (Number(selection.count) < 1) {
-      throw Object.assign(new Error('Select at least one cartela before entering the room.'), { status: 409, code: 'CARTELA_REQUIRED' });
-    }
-    await connection.commit();
-    const state = await roomSnapshot(room.id, req.telegramUser.id);
-    state.wallet = { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) };
-    res.json({ confirmed: true, ...state });
-  } catch (error) {
-    try { await connection.rollback(); } catch { /* The transaction may already be closed. */ }
-    next(error);
-  } finally {
-    connection.release();
-  }
-});
-
 app.get('/api/rooms/:id', authenticatedTelegramUser, async (req, res, next) => {
   try {
     await initializeSchema();
@@ -1953,6 +2065,7 @@ app.get('/api/rooms/:id', authenticatedTelegramUser, async (req, res, next) => {
       [req.params.id, String(req.telegramUser.id)],
     );
     if (!players.length) throw Object.assign(new Error('Join this room to view its game state.'), { status: 403 });
+    await startDueRoom(req.params.id);
     await advanceRoomGame(req.params.id);
     const state = await roomSnapshot(req.params.id, req.telegramUser.id);
     state.wallet = { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) };
@@ -1967,6 +2080,7 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
   let transactionStarted = false;
   try {
     await upsertUser(req.telegramUser);
+    await startDueRoom(req.params.id);
     const number = Number(req.params.number);
     if (!Number.isInteger(number) || number < 1 || number > 100) {
       throw Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 });
@@ -1987,7 +2101,28 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
       [room.id, number],
     );
     if (!slot) throw Object.assign(new Error('Cartela not found.'), { status: 404 });
-    if (slot.owner_telegram_id) throw Object.assign(new Error('That cartela has already been taken.'), { status: 409 });
+    if (slot.owner_telegram_id) {
+      if (String(slot.owner_telegram_id) === String(req.telegramUser.id)) {
+        const [[activeReservation]] = await connection.execute(
+          `SELECT id FROM cartela_reservations
+           WHERE room_id = ? AND cartela_number = ? AND telegram_id = ? AND status = 'ACTIVE'
+           ORDER BY id DESC LIMIT 1`,
+          [room.id, number, String(req.telegramUser.id)],
+        );
+        if (activeReservation) {
+          await connection.commit();
+          transactionStarted = false;
+          res.json({
+            selected: true,
+            idempotent: true,
+            room: (await roomSnapshot(room.id, req.telegramUser.id)).room,
+            wallet: { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) },
+          });
+          return;
+        }
+      }
+      throw Object.assign(new Error('That cartela has already been taken.'), { status: 409 });
+    }
     const [[count]] = await connection.execute(
       `SELECT COUNT(*) AS count FROM cartela_reservations
        WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
@@ -2004,7 +2139,10 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
     const available = await getAvailableBalance(String(req.telegramUser.id), connection);
     const cost = decimalToMinorUnits(room.stake);
     if (decimalToMinorUnits(available) < cost) {
-      throw Object.assign(new Error('Insufficient balance. Please deposit funds to continue.'), { status: 400 });
+      throw Object.assign(
+        new Error(`Insufficient balance. You need ${formatAmount(room.stake)} BIRR to select this cartela.`),
+        { status: 400, code: 'INSUFFICIENT_BALANCE' },
+      );
     }
     const before = decimalToMinorUnits(wallet.balance);
     const after = before - cost;
@@ -2034,18 +2172,6 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
       'UPDATE bingo_rooms SET prize_pool = prize_pool + ? WHERE id = ?',
       [formatAmount(room.stake), room.id],
     );
-    const [[ready]] = await connection.execute(
-      `SELECT COUNT(DISTINCT owner_telegram_id) AS count FROM cartela_slots
-       WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
-      [room.id],
-    );
-    if (Number(ready.count) >= Number(room.min_players)) {
-      await connection.execute(
-        `UPDATE bingo_rooms SET status = 'PLAYING', started_at = CURRENT_TIMESTAMP,
-         last_call_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'WAITING'`,
-        [room.id],
-      );
-    }
     await connection.commit();
     transactionStarted = false;
     res.json({
@@ -2065,6 +2191,7 @@ app.post('/api/rooms/:id/cartelas/:number/deselect', authenticatedTelegramUser, 
   const connection = await pool.getConnection();
   try {
     await initializeSchema();
+    await startDueRoom(req.params.id);
     const number = Number(req.params.number);
     if (!Number.isInteger(number) || number < 1 || number > 100) {
       throw Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 });

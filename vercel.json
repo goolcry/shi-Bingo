@@ -1,5 +1,11 @@
 {
   "buildCommand": "npm run build",
+  "crons": [
+    {
+      "path": "/api/cron/rooms",
+      "schedule": "* * * * *"
+    }
+  ],
   "functions": {
     "index.js": {
       "includeFiles": "public/mini-app.js"

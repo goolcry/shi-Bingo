@@ -22,7 +22,7 @@ const words = {
     play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', settings: 'Settings', welcome: 'Play. Win. Enjoy!',
     balance: 'Balance', refresh: 'Refresh', rooms: 'Available room', roomEmpty: 'No waiting rooms are open right now.',
     retry: 'Retry', join: 'JOIN +', cards: 'Select cartelas', available: 'Available', selected: 'Yours',
-    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to two cartelas. Funds are charged only after the server confirms your selection.',
+    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Tap an available cartela to select it immediately. Choose up to two.',
     back: 'Back', game: 'Bingo game', recent: 'Recent calls', callBoard: 'Number board', leave: 'Leave room',
     noHistory: 'No game history yet.', noRanks: 'Rankings will appear after completed games.',
     deposit: 'Deposit', withdraw: 'Withdraw', share: 'Share invite', copy: 'Copy invite link',
@@ -34,7 +34,7 @@ const words = {
     play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
     balance: 'ቀሪ ሂሳብ', refresh: 'አድስ', rooms: 'ያሉ ክፍሎች', roomEmpty: 'አሁን የሚጠባበቅ ክፍል የለም።',
     retry: 'እንደገና ሞክር', join: 'ወደ ክፍል ግባ', cards: 'ካርቴላ ይምረጡ', available: 'ያለ', selected: 'የእርስዎ', taken: 'ተይዟል',
-    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሁለት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
+    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'ያለ ካርቴላ ወዲያውኑ ለመምረጥ ይንኩ። እስከ ሁለት ይምረጡ።',
     back: 'ተመለስ', game: 'የቢንጎ ጨዋታ', recent: 'የቅርብ ጥሪዎች', callBoard: 'ቁጥር ሰሌዳ', leave: 'ከክፍሉ ውጣ',
     noHistory: 'ገና የጨዋታ ታሪክ የለም።', noRanks: 'ጨዋታዎች ሲጠናቀቁ ደረጃዎች ይታያሉ።',
     deposit: 'ገንዘብ አስገባ', withdraw: 'ገንዘብ አውጣ', share: 'ግብዣ አጋራ', copy: 'የግብዣ አገናኝ ቅዳ',
@@ -65,6 +65,17 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
     throw error;
   }
   return data;
+}
+
+function withRoomClock(room) {
+  if (!room?.countdown) return room;
+  return {
+    ...room,
+    countdown: {
+      ...room.countdown,
+      clientOffset: Number(room.countdown.serverNow) - Date.now(),
+    },
+  };
 }
 
 function App() {
@@ -121,7 +132,7 @@ function App() {
 
   const loadRoom = useCallback(async (id) => {
     const data = await request(`/api/rooms/${encodeURIComponent(id)}`);
-    setRoom(data.room);
+    setRoom(withRoomClock(data.room));
     setGame(data.game || null);
     if (data.wallet?.availableBalance !== undefined) {
       setWallet(data.wallet.availableBalance);
@@ -235,7 +246,7 @@ function App() {
       try {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}`);
         if (!active || revision !== roomStateRevision.current) return;
-        setRoom(data.room);
+        setRoom(withRoomClock(data.room));
         setGame(data.game || null);
         setWallet(data.wallet?.availableBalance ?? wallet);
         if (data.room.status === 'PLAYING') setView('game');
@@ -319,7 +330,7 @@ function App() {
     try {
       const data = await request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} });
       roomStateRevision.current += 1;
-      setRoom(data.room);
+      setRoom(withRoomClock(data.room));
       setGame(data.game || null);
       setWallet(data.wallet.availableBalance);
       setWalletError('');
@@ -341,7 +352,7 @@ function App() {
     if (!room || busy || card.state === 'TAKEN') return;
     const currentSelectionCount = room.cartelas.filter((item) => item.state === 'MINE').length;
     if (card.state === 'AVAILABLE' && currentSelectionCount >= MAX_CARTELAS_PER_PLAYER) {
-      setError(`You can select up to ${MAX_CARTELAS_PER_PLAYER} cartelas in one room.`);
+      setError('Maximum 2 cartelas allowed per room.');
       return;
     }
     setBusy(true);
@@ -352,7 +363,7 @@ function App() {
         body: {},
       });
       roomStateRevision.current += 1;
-      setRoom(data.room);
+      setRoom(withRoomClock(data.room));
       setWallet(data.wallet.availableBalance);
       setWalletError('');
       if (data.room.status === 'PLAYING') {
@@ -393,30 +404,6 @@ function App() {
       await Promise.all([refreshWallet(), refreshRooms()]);
     } catch (reason) {
       setError(reason.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function confirmRoomEntry() {
-    if (!room || busy) return;
-    setBusy(true);
-    try {
-      const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/confirm-entry`, {
-        method: 'POST',
-        body: {},
-      });
-      roomStateRevision.current += 1;
-      setRoom(data.room);
-      setGame(data.game || null);
-      setWallet(data.wallet.availableBalance);
-      setWalletError('');
-      setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'waiting');
-      setError('');
-    } catch (reason) {
-      setError(reason.message);
-      if (['ROOM_CLOSED', 'ROOM_NOT_FOUND', 'NOT_A_ROOM_PLAYER'].includes(reason.code)) returnToLobby();
-      else if (room?.id) await loadRoom(room.id).catch((refreshError) => setError(`${reason.message} Room refresh failed: ${refreshError.message}`));
     } finally {
       setBusy(false);
     }
@@ -465,7 +452,7 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onRefresh={() => loadRoom(room.id)} onBack={returnToLobby} onLeave={leaveRoom} onConfirm={confirmRoomEntry} onWallet={() => go('wallet')} />}
+      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onRefresh={() => loadRoom(room.id)} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
         setBusy(true);
@@ -535,128 +522,109 @@ function PlayScreen({ t, rooms, roomsLoading, onJoin, busy, onRefresh }) {
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onLeave, onConfirm, onWallet }) {
+function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onLeave }) {
   const cards = room.cartelas || [];
   const mine = cards.filter((card) => card.state === 'MINE');
-  const [previewNumber, setPreviewNumber] = useState(null);
-  const [confirmingDeselect, setConfirmingDeselect] = useState(false);
   const [notice, setNotice] = useState('');
-  const previewCard = cards.find((card) => card.number === previewNumber) || null;
+  const [clockNow, setClockNow] = useState(Date.now());
   const waiting = room.status === 'WAITING';
+  const minPlayers = Number(room.minPlayers) || 3;
   const remainingBalance = room.selection?.remainingBalance ?? wallet;
   const totalCost = room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString();
+  const countdown = room.countdown || {};
+  const serverNow = clockNow + Number(countdown.clientOffset || 0);
+  const secondsLeft = Math.max(0, Math.ceil((Number(countdown.deadline) - serverNow) / 1000));
+  const countdownProgress = Math.max(0, Math.min(100, secondsLeft / Number(countdown.durationSeconds || 30) * 100));
+  const enoughPlayers = Number(room.selectedPlayers || 0) >= minPlayers;
 
-  function openPreview(card) {
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function chooseCartela(card) {
+    if (busy || !waiting) return;
     if (card.state === 'TAKEN') {
       setNotice('This cartela has already been selected by another player.');
       return;
     }
     setNotice('');
-    setConfirmingDeselect(false);
-    setPreviewNumber(card.number);
-  }
-
-  async function submitPreviewAction() {
-    if (!previewCard || !waiting) return;
-    setNotice('');
     try {
-      await onToggle(previewCard);
-      setConfirmingDeselect(false);
-      if (previewCard.state === 'AVAILABLE') {
-        setNotice(`Cartela #${previewCard.number} selected for ${money(room.stake)} BIRR.`);
-      } else {
-        setNotice(`Cartela #${previewCard.number} deselected. ${money(room.stake)} BIRR refunded.`);
-      }
-      setPreviewNumber(null);
+      await onToggle(card);
+      setNotice(card.state === 'MINE'
+        ? `Cartela #${card.number} deselected and refunded.`
+        : `Cartela #${card.number} selected successfully!`);
     } catch {
       setNotice('');
     }
   }
 
   return <>
-    <button className="text-button" onClick={onBack}>← Back to rooms</button>
-    <section className="cartela-page-heading">
-      <div className="eyebrow">👑 SELECT CARTELAS</div>
-      <h1>Room #{room.roomNumber || room.id}</h1>
-      <span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span>
-    </section>
-    <section className="room-info-card panel">
-      <div className="room-info-heading"><div><small>ROOM</small><b>#{room.roomNumber || room.id}</b></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span></div>
-      <div className="room-info-grid">
-        <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
-        <div><small>PRIZE POOL</small><b>{money(room.prizePool)} BIRR</b></div>
-        <div><small>CARTELA PRICE</small><b>{money(room.stake)} BIRR each</b></div>
-      </div>
-    </section>
-    <section className="selection-overview panel">
-      <div><small>AVAILABLE BALANCE</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
-      <div><small>SELECTED CARTELAS</small><b>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</b></div>
-      <div><small>TOTAL COST</small><b>{money(totalCost)} BIRR</b></div>
-      <div><small>REMAINING BALANCE</small><b>{remainingBalance === null ? t.unavailable : `${money(remainingBalance)} BIRR`}</b></div>
-    </section>
-    <div className="cartela-section-title">
-      <div><h2>CHOOSE YOUR CARTELAS</h2><p>{cards.filter((card) => card.state === 'AVAILABLE').length} available · {cards.length} total</p></div>
-      <button className="outline-button" disabled={busy} onClick={onRefresh}>↻ Refresh</button>
+    <div className="cartela-topline">
+      <button className="text-button" onClick={onBack}>← Back</button>
+      <span>ROOM #{room.roomNumber || room.id}</span>
+      <button className="text-button cartela-leave" disabled={busy || !waiting} onClick={onLeave}>Leave</button>
     </div>
-    <div className="legend"><span><i className="available-dot" />Available</span><span><i className="mine-dot" />Yours ✓</span><span><i className="taken-dot" />Reserved 🔒</span></div>
-    {cards.length !== 100
-      ? <div className="empty panel" role="alert"><strong>Could not load all 100 cartelas.</strong><p>The room data contains {cards.length} cartelas. Refresh to try again.</p><button className="outline-button" onClick={onRefresh}>Retry</button></div>
-      : <div className="cartela-grid">{cards.map((card) => <button
-        key={card.number}
-        className={`cartela cartela-${String(card.state).toLowerCase()} ${busy ? 'processing' : ''}`}
-        disabled={busy}
-        aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected by you' : card.state === 'TAKEN' ? 'reserved by another player' : 'available'}`}
-        onClick={() => openPreview(card)}
-      >
-        {card.state === 'MINE' ? <><span>{card.number}</span><b aria-hidden="true">✓</b></> : card.state === 'TAKEN' ? <><span>{card.number}</span><b aria-hidden="true">🔒</b></> : card.number}
-      </button>)}</div>}
-    {notice && <p className="cartela-notice" role="status">{notice}</p>}
-    {!waiting && <p className="room-closed-note" role="status">Cartela selection is closed because this room is {room.status.toLowerCase()}.</p>}
-    <section className="selection-footer panel">
-      <div className="selection-footer-details">
-        <strong>{mine.length}/{MAX_CARTELAS_PER_PLAYER} CARTELAS</strong>
-        <span>{mine.length ? mine.map((card) => `#${card.number}`).join(', ') : 'Select at least one cartela'}</span>
-        <b>{money(totalCost)} BIRR <small>total</small></b>
-      </div>
-      <button className="primary-button" disabled={busy || !mine.length || !waiting || cards.length !== 100 || wallet === null} onClick={onConfirm}>
-        {busy ? t.loading : 'CONFIRM & ENTER ROOM'}
-      </button>
-      <div className="selection-footer-actions"><span>Balance · {remainingBalance === null ? '—' : `${money(remainingBalance)} BIRR`}</span><button className="text-button" onClick={onLeave}>Leave room &amp; refund</button></div>
-      {wallet === null && <button className="outline-button" onClick={onWallet}>Wallet unavailable · Open wallet</button>}
+    <h1 className="cartela-title">SELECT CARTELAS</h1>
+    <section className="cartela-metrics panel" aria-label="Room and balance summary">
+      <div><small>BALANCE</small><b>{wallet === null ? t.unavailable : money(wallet)}</b><span>BIRR</span></div>
+      <div><small>COST</small><b>{money(room.stake)}</b><span>BIRR / CARD</span></div>
+      <div><small>POT</small><b>{money(room.prizePool)}</b><span>BIRR</span></div>
+      <div><small>STARTS</small><b>{waiting ? `${String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:${String(secondsLeft % 60).padStart(2, '0')}` : room.status}</b><span>{waiting ? 'COUNTDOWN' : 'STATUS'}</span></div>
     </section>
-    {previewCard && <div className="modal-backdrop" role="presentation" onClick={() => { setPreviewNumber(null); setConfirmingDeselect(false); }}>
-      <section className="cartela-preview panel" role="dialog" aria-modal="true" aria-labelledby="cartela-preview-title" onClick={(event) => event.stopPropagation()}>
-        <button className="preview-close" aria-label="Close preview" onClick={() => { setPreviewNumber(null); setConfirmingDeselect(false); }}>×</button>
-        <div className="eyebrow">ROOM #{room.roomNumber || room.id}</div>
-        <h2 id="cartela-preview-title">CARTELA #{previewCard.number}</h2>
-        <div className={`preview-state preview-${previewCard.state.toLowerCase()}`}>
-          {previewCard.state === 'MINE' ? '✓ SELECTED BY YOU' : 'AVAILABLE TO SELECT'}
-        </div>
-        <div className="preview-board">
-          {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="preview-column" key={letter}>
-            <b>{letter}</b>
-            {[0, 1, 2, 3, 4].map((row) => {
-              const value = previewCard.numbers?.[row * 5 + column];
-              return <span className={value === 'FREE' ? 'preview-free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
-            })}
-          </div>)}
-        </div>
-        {confirmingDeselect
-          ? <div className="deselect-confirm" role="group" aria-label={`Confirm deselect cartela ${previewCard.number}`}>
-            <p>Deselect Cartela #{previewCard.number}? {money(room.stake)} BIRR will be refunded to your wallet.</p>
-            <div><button className="outline-button" disabled={busy} onClick={() => setConfirmingDeselect(false)}>Keep Cartela</button><button className="danger-button" disabled={busy} onClick={submitPreviewAction}>{busy ? t.loading : 'Deselect & Refund'}</button></div>
+    <section className="countdown-panel panel" aria-live="polite">
+      <div className="countdown-copy">
+        <div><small>GAME STARTS IN</small><strong>{String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:{String(secondsLeft % 60).padStart(2, '0')}</strong></div>
+        <span className={`countdown-status ${enoughPlayers ? 'players-ready' : ''}`}>
+          {enoughPlayers ? 'MINIMUM PLAYERS REACHED' : 'WAITING FOR PLAYERS'}
+        </span>
+      </div>
+      <div className="countdown-track" role="progressbar" aria-label="Time remaining" aria-valuemin="0" aria-valuemax="30" aria-valuenow={secondsLeft}>
+        <span style={{ width: `${countdownProgress}%` }} />
+      </div>
+      <p>{room.selectedPlayers || 0}/{minPlayers} PLAYERS · Room #{room.roomNumber || room.id} · {room.status}</p>
+    </section>
+    {!waiting && <p className="room-closed-note" role="status">Players ready! Starting Bingo... Cartela selection is closed.</p>}
+    {notice && <p className="cartela-notice" role="status">{notice}</p>}
+    <section className="cartela-picker panel">
+      <div className="cartela-picker-heading">
+        <h2>🎟 CARTELA NUMBERS</h2>
+        <span>Select 1–2</span>
+      </div>
+      <p className="cartela-picker-summary">{mine.length}/{MAX_CARTELAS_PER_PLAYER} selected · {money(totalCost)} BIRR spent · {remainingBalance === null ? '—' : `${money(remainingBalance)} BIRR remaining`}</p>
+      {cards.length !== 100
+        ? <div className="empty" role="alert"><strong>Could not load all 100 cartelas.</strong><p>Loaded {cards.length}. Refresh to retry.</p><button className="outline-button" disabled={busy} onClick={onRefresh}>Retry</button></div>
+        : <div className="cartela-grid">{cards.map((card) => <button
+          key={`${room.id}-${card.number}`}
+          className={`cartela cartela-${String(card.state).toLowerCase()} ${busy ? 'processing' : ''}`}
+          disabled={busy || !waiting}
+          aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected by you, tap to deselect and refund' : card.state === 'TAKEN' ? 'reserved by another player' : 'available, tap to select'}`}
+          onClick={() => chooseCartela(card)}
+        >
+          {card.state === 'MINE' ? <><span>{card.number}</span><b aria-hidden="true">✓</b></> : card.state === 'TAKEN' ? <><span>{card.number}</span><b aria-hidden="true">🔒</b></> : card.number}
+        </button>)}</div>}
+      <div className="cartela-legend"><span><i className="available-dot" />Available</span><span><i className="mine-dot" />Yours</span><span><i className="taken-dot" />Reserved</span></div>
+      <button className="outline-button cartela-refresh" disabled={busy} onClick={onRefresh}>↻ Refresh availability</button>
+    </section>
+    <section className="selected-previews" aria-label="Your selected cartelas">
+      <h2>YOUR SELECTED CARTELA{mine.length === 1 ? '' : 'S'} <span>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</span></h2>
+      {mine.length
+        ? mine.map((card) => <article className="selected-cartela panel" key={card.number}>
+          <header><div><strong>CARTELA #{card.number}</strong><small>ROOM #{room.roomNumber || room.id}</small></div><span>✓ SELECTED</span></header>
+          <div className="selected-board">
+            {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="selected-column" key={letter}>
+              <b>{letter}</b>
+              {[0, 1, 2, 3, 4].map((row) => {
+                const value = card.numbers?.[row * 5 + column];
+                return <span className={value === 'FREE' ? 'selected-free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
+              })}
+            </div>)}
           </div>
-          : <div className="preview-actions">
-            <p>{previewCard.state === 'MINE' ? 'Selected · refundable while the room is waiting.' : `Cost: ${money(room.stake)} BIRR`}</p>
-            {previewCard.state === 'MINE'
-              ? <button className="danger-button" disabled={busy || !waiting} onClick={() => setConfirmingDeselect(true)}>DESELECT CARTELA</button>
-              : <button className="primary-button" disabled={busy || !waiting || (mine.length >= MAX_CARTELAS_PER_PLAYER && previewCard.state !== 'MINE')} onClick={submitPreviewAction}>
-                {busy ? t.loading : mine.length >= MAX_CARTELAS_PER_PLAYER ? 'MAXIMUM 2 CARTELAS' : 'SELECT CARTELA'}
-              </button>}
-            {!waiting && <p className="room-closed-note">This room no longer accepts cartela changes.</p>}
-          </div>}
-      </section>
-    </div>}
+          <footer><span>{money(room.stake)} BIRR</span><button className="danger-button" disabled={busy || !waiting} onClick={() => chooseCartela(card)}>DESELECT &amp; REFUND</button></footer>
+        </article>)
+        : <p className="selected-empty panel">Your selected cartela previews will appear here after the server confirms a selection.</p>}
+    </section>
+    {!waiting && <p className="room-closed-note">This room no longer accepts cartela changes.</p>}
   </>;
 }
 
@@ -1019,6 +987,64 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .waiting-room>.primary-button,.waiting-room>.outline-button,.waiting-room>.danger-button{justify-content:center;width:100%;margin:0;padding:10px;font-size:11px}
 @media(max-width:370px){.cartela-grid{gap:5px}.cartela{min-height:42px;font-size:12px}.cartela-section-title h2{font-size:10px}.selection-overview{gap:8px;padding:10px}.selection-overview b{font-size:10px}}
 @media(min-width:600px){.cartela-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.modal-backdrop{align-items:center}.cartela-preview{max-height:85vh}.cartela{min-height:52px}}
+.cartela-topline{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin:0 2px 10px;color:#a997ba;font-size:10px;font-weight:750;letter-spacing:.08em}
+.cartela-topline .text-button{justify-self:start;color:#b8a6cc;font-size:12px}
+.cartela-topline .cartela-leave{justify-self:end;color:#ff9ba4}
+.cartela-title{margin:0 0 11px;color:#aa83d7;font-size:15px;font-weight:900;letter-spacing:.14em}
+.cartela-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;margin:0 0 10px;padding:6px;border-color:#3d2754;border-radius:17px;background:#100819}
+.cartela-metrics>div{display:grid;justify-items:center;gap:3px;min-width:0;padding:9px 3px;border:1px solid #39264c;border-radius:13px;background:#130a1e;text-align:center}
+.cartela-metrics small{color:#9d87b3;font-size:8px;font-weight:850;letter-spacing:.08em}
+.cartela-metrics b{max-width:100%;overflow:hidden;color:#f7f1fd;font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.cartela-metrics>div:nth-child(2) b,.cartela-metrics>div:nth-child(3) b{color:#ffd34d}
+.cartela-metrics span{color:#a998b9;font-size:7px;font-weight:750}
+.countdown-panel{display:grid;gap:8px;margin:0 0 10px;padding:12px;border-color:#3d2754;border-radius:16px;background:#140b20}
+.countdown-copy{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.countdown-copy>div{display:grid;gap:2px}
+.countdown-copy small{color:#a78bc2;font-size:8px;font-weight:850;letter-spacing:.1em}
+.countdown-copy strong{color:#fff;font-size:24px;line-height:1.1;font-variant-numeric:tabular-nums}
+.countdown-status{color:#c6a4e9;font-size:8px;font-weight:900;letter-spacing:.07em;text-align:right}
+.countdown-status.players-ready{color:#70e59b}
+.countdown-track{height:5px;overflow:hidden;border-radius:99px;background:#2c1d3b}
+.countdown-track span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8d58d1,#ffd047);transition:width .25s linear}
+.countdown-panel>p{margin:0;color:#b9a8ca;font-size:9px;font-weight:750;letter-spacing:.04em}
+.cartela-picker{margin:0 0 11px;padding:11px 9px;border-color:#3d2754;border-radius:18px;background:#140b20}
+.cartela-picker-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:1px 3px 0}
+.cartela-picker-heading h2{margin:0;color:#faf6ff;font-size:12px;font-weight:900}
+.cartela-picker-heading>span{color:#b5a2c8;font-size:9px}
+.cartela-picker-summary{margin:7px 3px 10px;color:#a996ba;font-size:9px}
+.cartela-picker .cartela-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;padding:3px 1px 10px}
+.cartela-picker .cartela{position:relative;display:grid;place-items:center;min-width:0;min-height:51px;aspect-ratio:1;border:1px solid #3c294e;border-radius:12px;background:#180e26;color:#aa9ab9;font-size:12px;font-weight:800}
+.cartela-picker .cartela-mine{border-color:#60df91;background:#168c4b;color:#fff;box-shadow:0 0 12px #16a34a44}
+.cartela-picker .cartela-mine b,.cartela-picker .cartela-taken b{position:absolute;top:2px;right:3px;font-size:8px}
+.cartela-picker .cartela-taken{border-color:#a44350;background:#64232d;color:#ffbdc4}
+.cartela-picker .cartela:disabled{cursor:not-allowed}
+.cartela-picker .cartela.processing{animation:pulse .8s infinite}
+.cartela-legend{display:flex;flex-wrap:wrap;gap:12px;padding:2px 3px 8px;color:#b7a6c8;font-size:8px}
+.cartela-legend span{display:flex;align-items:center;gap:4px}
+.cartela-legend i{width:8px;height:8px;border-radius:3px;background:#241430}
+.cartela-legend .mine-dot{background:#22c55e}
+.cartela-legend .taken-dot{background:#b83242}
+.cartela-refresh{width:100%;padding:8px;font-size:10px}
+.selected-previews{display:grid;gap:9px;margin:12px 0 18px}
+.selected-previews>h2{display:flex;justify-content:space-between;align-items:center;margin:0;color:#aa83d7;font-size:11px;font-weight:900;letter-spacing:.1em}
+.selected-previews>h2 span{color:#c3b3d2;font-size:10px;letter-spacing:0}
+.selected-cartela{padding:11px;border-color:#3d2754;border-radius:16px;background:#140b20}
+.selected-cartela>header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px}
+.selected-cartela>header>div{display:grid;gap:2px}
+.selected-cartela>header strong{color:#fff;font-size:11px}
+.selected-cartela>header small{color:#a996ba;font-size:8px}
+.selected-cartela>header>span{color:#65df92;font-size:8px;font-weight:900;letter-spacing:.07em}
+.selected-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+.selected-column{display:grid;grid-template-rows:25px repeat(5,minmax(31px,1fr));gap:3px}
+.selected-column>*{display:grid;place-items:center;min-width:0;border:1px solid #39264c;border-radius:6px;background:#100819;color:#eee5f7;font-size:10px;font-weight:750}
+.selected-column>b{border-color:#51366b;background:#251632;color:#d5b0ff;font-size:12px}
+.selected-column .selected-free{background:#4c3511;color:#ffdc70;font-size:7px}
+.selected-cartela>footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:9px;color:#ffd34d;font-size:10px;font-weight:850}
+.selected-cartela>footer .danger-button{width:auto;margin:0;padding:7px 9px;font-size:8px}
+.selected-empty{margin:0;padding:13px;border-color:#39264c;color:#a996ba;font-size:9px}
+.cartela-notice{margin:0 0 9px;padding:8px 10px;border:1px solid #493263;border-radius:10px;background:#170d21;color:#e4d9ed;font-size:10px}
+@media(max-width:370px){.cartela-picker .cartela-grid{gap:4px}.cartela-picker .cartela{min-height:44px;border-radius:9px;font-size:11px}.selected-column{grid-template-rows:22px repeat(5,minmax(27px,1fr))}}
+@media(min-width:600px){.cartela-picker .cartela-grid{grid-template-columns:repeat(8,minmax(0,1fr))}.cartela-picker .cartela{min-height:48px}.selected-board{max-width:400px}}
 `;
 
 createRoot(document.getElementById('root')).render(<App />);
