@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
-const tg = window.Telegram?.WebApp;
 const money = (value) => {
   if (value === undefined || value === null) return '—';
   const [whole, decimal = '00'] = String(value).split('.');
@@ -15,10 +14,11 @@ const multiplyMoney = (value, multiplier) => {
   const [whole, decimal = '00'] = String(value || '0').split('.');
   return (BigInt(whole) * 100n + BigInt((decimal + '00').slice(0, 2))) * BigInt(multiplier);
 };
+const telegramWebApp = () => window.Telegram?.WebApp;
 
 const words = {
   en: {
-    play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', welcome: 'Play. Win. Enjoy!',
+    play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', settings: 'Settings', welcome: 'Play. Win. Enjoy!',
     balance: 'Balance', refresh: 'Refresh', rooms: 'Available rooms', roomEmpty: 'No waiting rooms are open right now.',
     retry: 'Retry', join: 'Join room', cards: 'Select cartelas', available: 'Available', selected: 'Yours',
     taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to two cartelas. Funds are charged only after the server confirms your selection.',
@@ -30,7 +30,7 @@ const words = {
     roomsUnavailable: 'Could not load rooms.', dataUnavailable: 'Could not load this data.',
   },
   am: {
-    play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
+    play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
     balance: 'ቀሪ ሂሳብ', refresh: 'አድስ', rooms: 'ያሉ ክፍሎች', roomEmpty: 'አሁን የሚጠባበቅ ክፍል የለም።',
     retry: 'እንደገና ሞክር', join: 'ወደ ክፍል ግባ', cards: 'ካርቴላ ይምረጡ', available: 'ያለ', selected: 'የእርስዎ', taken: 'ተይዟል',
     count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሁለት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
@@ -75,7 +75,9 @@ function App() {
   const [appInfo, setAppInfo] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const initData = tg?.initData;
+  const [initData, setInitData] = useState('');
+  const [telegramDiagnostic, setTelegramDiagnostic] = useState('');
+  const [telegramChecked, setTelegramChecked] = useState(false);
 
   const request = useCallback((path, options) => api(path, { ...options, initData }), [initData]);
   const refreshWallet = useCallback(async () => {
@@ -99,23 +101,59 @@ function App() {
   }, [request]);
 
   useEffect(() => {
-    tg?.ready();
-    tg?.expand();
-    if (tg?.BackButton) {
-      tg.BackButton.onClick(() => {
+    let active = true;
+    let attempts = 0;
+    const checkTelegram = () => {
+      attempts += 1;
+      const telegram = telegramWebApp();
+      telegram?.ready();
+      telegram?.expand();
+      if (telegram?.initData) {
+        if (active) {
+          setInitData(telegram.initData);
+          setTelegramChecked(true);
+          setTelegramDiagnostic('');
+        }
+        return true;
+      }
+      if (attempts >= 20) {
+        if (active) {
+          setTelegramChecked(true);
+          setTelegramDiagnostic(telegram
+            ? `Telegram SDK detected (${telegram.platform || 'platform unknown'}, version ${telegram.version || 'unknown'}), but no launch data was provided. Close this window and reopen the Mini App from the bot menu.`
+            : 'Telegram WebApp SDK was not detected. Open this Mini App from the bot menu inside Telegram.');
+        }
+        return true;
+      }
+      return false;
+    };
+    const poll = window.setInterval(() => {
+      if (checkTelegram()) window.clearInterval(poll);
+    }, 250);
+    checkTelegram();
+    return () => {
+      active = false;
+      window.clearInterval(poll);
+    };
+  }, []);
+
+  useEffect(() => {
+    const telegram = telegramWebApp();
+    if (telegram?.BackButton) {
+      telegram.BackButton.onClick(() => {
         if (view === 'game' || view === 'cartelas') {
           setView('play');
           setRoom(null);
           setGame(null);
         } else if (view !== 'play') setView('play');
       });
-      return () => tg.BackButton.offClick();
+      return () => telegram.BackButton.offClick();
     }
   }, [view]);
 
   useEffect(() => {
     if (!initData) {
-      setError('Launch this app from the SHISHO BINGO Telegram bot to verify your account.');
+      if (telegramChecked) setError(telegramDiagnostic);
       return;
     }
     let active = true;
@@ -128,7 +166,7 @@ function App() {
       })
       .catch((reason) => { if (active) setError(reason.message); });
     return () => { active = false; };
-  }, [initData, refreshWallet, refreshRooms, loadRoom]);
+  }, [initData, telegramChecked, telegramDiagnostic, refreshWallet, refreshRooms, loadRoom]);
 
   useEffect(() => {
     if (!room?.id || !['cartelas', 'game'].includes(view)) return undefined;
@@ -185,6 +223,24 @@ function App() {
     setView(next);
     if (next === 'play') refreshRooms().catch((reason) => setError(reason.message));
   };
+
+  function retryTelegramAuthentication() {
+    const telegram = telegramWebApp();
+    telegram?.ready();
+    telegram?.expand();
+    if (telegram?.initData) {
+      setTelegramDiagnostic('');
+      setInitData(telegram.initData);
+      setError('');
+      return;
+    }
+    setTelegramChecked(true);
+    const diagnostic = telegram
+      ? `Telegram SDK detected (${telegram.platform || 'platform unknown'}, version ${telegram.version || 'unknown'}), but no launch data was provided. Close this window and reopen the Mini App from the bot menu.`
+      : 'Telegram WebApp SDK was not detected. Open this Mini App from the bot menu inside Telegram.';
+    setTelegramDiagnostic(diagnostic);
+    setError(diagnostic);
+  }
 
   async function enterRoom(item) {
     setBusy(true);
@@ -270,20 +326,27 @@ function App() {
   return <div className="app-shell">
     <header className="topbar">
       <div className="brand-mark"><span className="crown">♛</span><span>SHISHO <b>BINGO</b></span></div>
-      <div className="player-chip">{user?.firstName || t.loading}</div>
+      <div className="player-chip">{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</div>
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
         💰 {wallet === null ? '—' : `${money(wallet)} BIRR`}
       </button>
     </header>
 
-    {error && <div className="alert" role="alert"><span>{error}</span><button onClick={() => {
-      setError('');
-      Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => setError(reason.message));
-    }}>{t.retry}</button></div>}
+    {error && <div className="alert" role="alert"><span>{error}</span>
+      {error.toLowerCase().includes('insufficient balance') && <button onClick={() => go('wallet')}>{t.deposit}</button>}
+      <button onClick={() => {
+        if (!initData) {
+          retryTelegramAuthentication();
+          return;
+        }
+        setError('');
+        Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => setError(reason.message));
+      }}>{t.retry}</button>
+    </div>}
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={() => go('play')} />}
+      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={leaveRoom} />}
       {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
         setBusy(true);
         try { await request(`/api/rooms/${room.id}/bingo`, { method: 'POST', body: { cartelaNumber: number } }); await loadRoom(room.id); }
@@ -291,15 +354,15 @@ function App() {
         finally { setBusy(false); }
       }} />}
       {view === 'winner' && <WinnerScreen game={game} room={room} t={t} onBack={() => go('play')} />}
-      {view === 'ranks' && <RanksScreen ranks={ranks} t={t} />}
+      {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
-      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} admin={admin} referral={referral} appInfo={appInfo} onCreateRoom={createRoom} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
+      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} admin={admin} referral={referral} appInfo={appInfo} onCreateRoom={createRoom} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
       {view === 'wallet' && <WalletScreen wallet={wallet} t={t} onRefresh={() => Promise.all([refreshWallet(), request('/api/history')]).catch((reason) => setError(reason.message))} onError={setError} />}
     </main>
 
     {!['cartelas', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
       {[
-        ['play', '🎮', t.play], ['ranks', '🏆', t.ranks], ['history', '📜', t.history], ['profile', '👤', t.profile],
+        ['play', '🎮', t.play], ['wallet', '💰', t.balance], ['history', '📜', t.history], ['profile', '⚙️', t.settings],
       ].map(([id, icon, label]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => go(id)}>
         <span>{icon}</span>{label}
       </button>)}
@@ -319,17 +382,20 @@ function PlayScreen({ t, rooms, onJoin, busy, onRefresh }) {
     {rooms.length === 0
       ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>New rooms will appear here when opened.</p><button className="outline-button" onClick={onRefresh}>{t.retry}</button></div>
       : <div className="room-list">{rooms.map((room) => <article className="room-card panel" key={room.id}>
-        <div className="room-title"><div><span className="eyebrow">ROOM</span><h3>#{room.roomNumber || room.id}</h3></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span></div>
+        <div className="room-title"><div><span className="eyebrow">ROOM</span><h3>#{room.roomNumber || room.id}</h3><small className="muted">75-Ball Classic · Max {room.maxPlayers} Players</small></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span></div>
         <div className="room-stats">
           <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
           <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
           <div><small>PRIZE POOL</small><b className="gold">{money(room.prizePool)} BIRR</b></div>
         </div>
-        <button className="primary-button" disabled={busy || !['WAITING', 'STARTING'].includes(room.status)} onClick={() => onJoin(room)}>
+        <button className="primary-button" disabled={busy || room.status !== 'WAITING' || room.currentPlayers >= room.maxPlayers} onClick={() => onJoin(room)}>
           {busy ? t.loading : t.join} <span>→</span>
         </button>
       </article>)}</div>}
-    <section className="howto panel"><div className="eyebrow">HOW TO PLAY</div><h2>Pick. Play. Win.</h2><div className="steps"><span><b>01</b> Pick a room</span><span><b>02</b> Choose up to 2 cartelas</span><span><b>03</b> Auto-mark and win</span></div><p className="muted">{t.rules} Prizes are distributed from the room pool after game validation.</p></section>
+    <section className="howto panel"><div className="eyebrow">🎁 PLAY SMART</div><h2>Pick. Play. Win.</h2>
+      <p className="muted">Choose up to 2 cartelas. Each cartela costs 10.00 BIRR.</p>
+      <p className="muted">{t.rules} Prizes are paid from the room pool after server validation.</p>
+    </section>
   </>;
 }
 
@@ -355,8 +421,10 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
       onClick={() => onToggle(card)}
     >{card.number}</button>)}</div>
     <div className="sticky-summary panel">
-      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'}</small><b>{t.total}: {money(multiplyMoney(room.stake, mine.length).toString())} BIRR</b></div>
-      <span className="muted">Balance · {wallet === null ? '—' : money(wallet)} BIRR</span>
+      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/2</small>
+        <b>{t.total}: {money(room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString())} BIRR</b>
+      </div>
+      <span className="muted">Remaining · {room.selection?.remainingBalance == null ? (wallet === null ? '—' : money(wallet)) : money(room.selection.remainingBalance)} BIRR</span>
     </div>
   </>;
 }
@@ -420,10 +488,10 @@ function WinnerScreen({ game, room, t, onBack }) {
   </section>;
 }
 
-function RanksScreen({ ranks, t }) {
+function RanksScreen({ ranks, t, userId }) {
   return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">🏆 {t.ranks}</h1>
     {ranks.length ? <div className="panel rank-list">{ranks.map((rank, i) => <div className="rank-row" key={rank.userId || i}>
-      <span className="rank-position">{rank.rank || i + 1}</span><strong>{rank.displayName}</strong><span>{rank.gamesWon} wins</span><b>{money(rank.winnings)} BIRR</b>
+      <span className="rank-position">{rank.rank || i + 1}</span><strong>{rank.displayName}{rank.userId === userId ? ' (You)' : ''}</strong><span>{rank.gamesWon} wins</span><b>{money(rank.winnings)} BIRR</b>
     </div>)}</div> : <div className="empty panel"><span className="empty-icon">👑</span><strong>{t.noRanks}</strong></div>}
   </>;
 }
@@ -432,14 +500,14 @@ function HistoryScreen({ history, t }) {
   return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">📜 {t.history}</h1>
     {history.length ? <div className="history-list">{history.map((item, index) => <article className="panel history-item" key={item.id || index}>
       <div className="row"><strong>{item.roomId ? `Room #${item.roomId}` : item.type}</strong><span className="status">{item.result || item.status || item.type}</span></div>
-      <p>{item.cartelas ? `Cartelas: ${item.cartelas.join(', ')}` : item.description}</p>
+      <p>{item.cartelas ? `Cartelas: ${item.cartelas.join(', ')} · Stake: ${money(item.stake)} BIRR${item.pattern ? ` · Pattern: ${item.pattern}` : ''}` : item.description}</p>
       <div className="row muted"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}</span><b>{item.prize ? `${money(item.prize)} BIRR` : item.amount ? `${money(item.amount)} BIRR` : ''}</b></div>
     </article>)}</div> : <div className="empty panel"><span className="empty-icon">📜</span><strong>{t.noHistory}</strong></div>}
   </>;
 }
 
-function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, referral, appInfo, onCreateRoom, onRefresh }) {
-  const [roomSettings, setRoomSettings] = useState({ stake: '', minPlayers: '', maxPlayers: '' });
+function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, referral, appInfo, onCreateRoom, onRanks, onRefresh }) {
+  const [roomSettings, setRoomSettings] = useState({ minPlayers: '', maxPlayers: '' });
   const [roomMessage, setRoomMessage] = useState('');
   const info = profile?.user || user;
   async function submitRoom(event) {
@@ -447,7 +515,6 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, refe
     setRoomMessage('');
     try {
       const created = await onCreateRoom({
-        stake: roomSettings.stake,
         minPlayers: Number(roomSettings.minPlayers),
         maxPlayers: Number(roomSettings.maxPlayers),
       });
@@ -475,25 +542,28 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, refe
         <Stat label={t.balance} value={wallet === null ? t.unavailable : `${money(wallet)} BIRR`} />
         <Stat label="Games won" value={profile?.games?.won ?? '—'} />
         <Stat label="Winnings" value={profile?.games?.winnings ? `${money(profile.games.winnings)} BIRR` : '—'} />
+        <Stat label="Win rate" value={`${profile?.games?.winRate ?? '—'}%`} />
         <Stat label="Referrals" value={profile?.referrals?.successful ?? '—'} />
       </div>
       <button disabled={busy} className="outline-button" onClick={onRefresh}>↻ {t.refresh}</button>
     </section>
     <section className="panel settings"><h2>Settings</h2><div className="row"><span>{t.language}</span>
       <div className="language-control"><button className={profile?.user?.language === 'en' ? 'selected' : ''} onClick={() => onLanguage('en')}>🇬🇧 English</button><button className={profile?.user?.language === 'am' ? 'selected' : ''} onClick={() => onLanguage('am')}>🇪🇹 አማርኛ</button></div>
-    </div><div className="row"><span>Rules</span><span className="muted">{t.rules}</span></div></section>
+    </div><div className="row"><span>Rules</span><span className="muted">{t.rules}</span></div>
+      <button className="outline-button" onClick={onRanks}>🏆 {t.ranks}</button>
+    </section>
     <section className="panel settings"><h2>{t.share}</h2>
       <p className="muted">{referral?.referralUrl || t.loading}</p>
       <div className="row">
         <button className="outline-button" onClick={shareInvite} disabled={!referral?.referralUrl}>{t.copy} / Share</button>
-        <button className="outline-button" onClick={() => appInfo?.supportUrl && tg?.openTelegramLink(appInfo.supportUrl)} disabled={!appInfo?.supportUrl}>{t.support}</button>
+        <button className="outline-button" onClick={() => appInfo?.supportUrl && telegramWebApp()?.openTelegramLink(appInfo.supportUrl)} disabled={!appInfo?.supportUrl}>{t.support}</button>
       </div>
       <p className="muted">Successful referrals: {referral?.successful ?? '—'}</p>
       {roomMessage && <p className="muted" role="status">{roomMessage}</p>}
     </section>
     {admin && <section className="panel settings"><h2>Create game room</h2>
       <form onSubmit={submitRoom}>
-        <label>Stake per cartela (BIRR)<input required inputMode="decimal" value={roomSettings.stake} onChange={(event) => setRoomSettings({ ...roomSettings, stake: event.target.value })} /></label>
+        <p className="muted">Each cartela costs 10.00 BIRR.</p>
         <label>Minimum players to start<input required type="number" min="2" max="100" value={roomSettings.minPlayers} onChange={(event) => setRoomSettings({ ...roomSettings, minPlayers: event.target.value })} /></label>
         <label>Maximum players<input required type="number" min="2" max="100" value={roomSettings.maxPlayers} onChange={(event) => setRoomSettings({ ...roomSettings, maxPlayers: event.target.value })} /></label>
         <button className="primary-button" disabled={busy}>{busy ? t.loading : 'Create room'}</button>
@@ -518,7 +588,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   useEffect(() => {
-    api('/api/deposit-options', { initData: tg?.initData }).then((data) => {
+    api('/api/deposit-options', { initData: telegramWebApp()?.initData }).then((data) => {
       setMethods(data.methods);
       setMethod(data.methods[0]?.method || '');
     }).catch((error) => setStatus(error.message));
@@ -530,7 +600,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
     setStatus('');
     try {
       const data = await api('/api/deposits', {
-        initData: tg?.initData,
+        initData: telegramWebApp()?.initData,
         method: 'POST',
         body: { method, amount, providerReference: reference },
       });
@@ -550,7 +620,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
     setWithdrawStatus('');
     try {
       const data = await api('/api/withdrawals', {
-        initData: tg?.initData,
+        initData: telegramWebApp()?.initData,
         method: 'POST',
         body: {
           amount: withdrawAmount,
@@ -603,6 +673,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .game-head{display:flex;justify-content:space-between;align-items:center}.game-head h2{margin:4px 0}.game-stats{grid-template-columns:repeat(4,1fr);padding:13px}.last-number{text-align:center;padding:15px;margin-top:12px}.last-number small{color:var(--muted);letter-spacing:.1em;font-size:10px}.last-number>strong{display:block;font-size:36px;color:var(--gold);text-shadow:0 0 18px #ffc40055}.recent{display:flex;justify-content:center;gap:7px;margin-top:8px}.recent span{border-radius:99px;background:#322045;padding:5px 9px;font-size:11px}.bingo-board{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;padding:8px}.bingo-column{display:grid;grid-template-rows:30px repeat(15,minmax(22px,1fr));gap:3px}.bingo-letter{display:grid;place-items:center;color:var(--gold);font-weight:900}.bingo-cell{display:grid;place-items:center;min-height:22px;border:1px solid #30223f;border-radius:5px;background:#130d1b;color:#ada5b8;font-size:10px}.bingo-cell.called{background:#1458a8;color:#fff;border-color:#448ded}.bingo-cell.latest{background:#2ba767;box-shadow:0 0 9px #22c55e66}.free{display:grid;place-items:center;background:#5c3b0b;color:#ffe36a!important}.player-card{margin-top:13px;padding:13px}.player-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}.player-grid>*{display:grid;place-items:center;aspect-ratio:1;border-radius:6px;background:#120c19;font-size:11px}.player-grid b{color:var(--gold)}.player-grid .marked{background:#1458a8;color:#fff}.card-switch{display:flex;gap:8px;margin:10px 0}.card-switch button,.language-control button{border:1px solid #49365c;border-radius:9px;padding:8px;background:#170d21;color:var(--muted)}.card-switch .selected,.language-control .selected{border-color:var(--gold);color:var(--gold)}.danger-button{width:100%;margin-top:9px;padding:11px;border:1px solid #8a2834;border-radius:11px;background:#31131b;color:#ff9ba4;font-weight:700}
 .bottom-nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);z-index:9;display:grid;grid-template-columns:repeat(4,1fr);width:min(100%,760px);padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:#0c0614f2;border-top:1px solid #3b294d;backdrop-filter:blur(12px)}.bottom-nav button{display:grid;justify-items:center;gap:2px;border:0;background:transparent;color:#998ba9;font-size:10px}.bottom-nav button span{font-size:18px}.bottom-nav button.active{color:var(--gold)}
 .page-title{margin:8px 0 18px;font-size:25px}.rank-list,.history-list{display:grid;gap:9px}.rank-row{display:grid;grid-template-columns:28px 1fr auto;align-items:center;gap:8px;padding:13px}.rank-position{color:var(--gold);font-weight:900}.rank-row>span:nth-of-type(2){grid-column:2}.rank-row b{grid-column:3;grid-row:1 / span 2;color:var(--gold);font-size:11px}.history-item{padding:14px}.history-item p{margin:8px 0}.row{display:flex;justify-content:space-between;gap:8px}.profile-card,.wallet-panel{display:grid;justify-items:center;padding:20px;margin-bottom:13px;text-align:center}.avatar{display:grid;place-items:center;width:60px;height:60px;border:2px solid var(--gold);border-radius:50%;background:#30203e;color:var(--gold);font-size:27px;font-weight:900}.profile-card h2{margin:9px 0 0}.profile-card>p{margin:2px}.profile-stats{display:grid;grid-template-columns:repeat(2,1fr);width:100%;gap:8px;margin:17px 0}.stat{display:grid;gap:4px;padding:11px;border:1px solid #382848;border-radius:10px;background:#140b1e}.stat b{font-size:12px}.settings{padding:15px}.settings .row{align-items:center;flex-wrap:wrap;padding:10px 0;border-top:1px solid #352641}.language-control{display:flex;gap:5px}.wallet-panel{align-items:center;gap:9px}.wallet-panel>strong{font-size:28px;color:var(--gold)}.wallet-panel form{width:100%;text-align:left}.wallet-panel label{display:grid;gap:6px;margin:12px 0;color:var(--muted);font-size:12px}.wallet-panel input,.wallet-panel select{width:100%;padding:11px;border:1px solid #49365c;border-radius:9px;background:#0d0713;color:white}.payment-details{padding:10px;border-radius:9px;background:#120b1c;color:var(--gold);font-size:12px}.winner{text-align:center;padding:24px;margin-top:10px}.winner-crown{font-size:55px;color:var(--gold);text-shadow:0 0 24px #ffc40088;animation:crown 2s ease-in-out infinite}.winner h1{margin:5px;color:var(--gold);font-size:40px}.winner-row{display:grid;gap:4px;padding:12px;margin:10px 0;border:1px solid #49365c;border-radius:11px;background:#130b1b}.winner-row span{color:var(--muted);font-size:12px}.winner-row b{color:var(--gold)}.alert{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:10px 15px;padding:11px;border:1px solid #8d3238;border-radius:11px;background:#31141e;color:#ffc2c5;font-size:12px}.alert button{flex:none;border:1px solid #d47b7f;border-radius:8px;background:transparent;padding:6px;color:white}
+.cartela-mine{background:#22c55e;color:#041b0c;border-color:#86efac;box-shadow:0 0 13px #22c55e50}.legend .mine-dot{background:#22c55e}
 @keyframes crown{50%{transform:translateY(-4px) rotate(3deg);text-shadow:0 0 34px #ffc400cc}}@keyframes pulse{50%{opacity:.55}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
 @media(min-width:600px){.content{padding:22px 24px 36px}.cartela-grid{grid-template-columns:repeat(10,minmax(0,1fr))}.cartela{font-size:15px}.hero{min-height:230px;padding:27px}.features{margin-top:32px}.room-list{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom-nav{border-radius:18px 18px 0 0}}
 `;

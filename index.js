@@ -77,6 +77,7 @@ const pool = mysql.createPool({
   ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
   decimalNumbers: false,
 });
+const cartelaPrice = '10.00';
 
 let schemaPromise;
 function initializeSchema() {
@@ -409,13 +410,15 @@ const text = {
 
 const app = express();
 app.disable('x-powered-by');
-app.use(express.json({ limit: '256kb' }));
 app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   next();
 });
+app.use(express.json({ limit: '256kb' }));
 
 function languageOf(value) {
   return value === 'am' ? 'am' : 'en';
@@ -1390,6 +1393,12 @@ function authenticatedTelegramUser(req, res, next) {
     req.telegramUser = verifyInitData(req.get('Authorization')?.replace(/^tma\s+/i, ''));
     next();
   } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'telegram_auth_rejected',
+      requestId: req.requestId,
+      route: req.path,
+      code: 'TELEGRAM_AUTH_FAILED',
+    }));
     res.status(error.status || 401).json({ error: error.message });
   }
 }
@@ -1567,8 +1576,8 @@ async function roomSnapshot(roomId, telegramId) {
     [roomId],
   );
   const [players] = await pool.execute(
-    `SELECT COUNT(DISTINCT owner_telegram_id) AS count FROM cartela_slots
-     WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
+    `SELECT COUNT(*) AS count FROM bingo_players
+     WHERE room_id = ? AND left_at IS NULL`,
     [roomId],
   );
   const [winners] = await pool.execute(
@@ -1577,6 +1586,13 @@ async function roomSnapshot(roomId, telegramId) {
      WHERE w.room_id = ? ORDER BY w.id`,
     [roomId],
   );
+  const [[selection]] = await pool.execute(
+    `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0.00) AS total_cost
+     FROM cartela_reservations
+     WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
+    [roomId, String(telegramId)],
+  );
+  const availableBalance = await getAvailableBalance(String(telegramId));
   const calledNumbers = calls.map((call) => Number(call.number));
   const cartelas = cards.map((card) => {
     const mine = String(card.owner_telegram_id || '') === String(telegramId);
@@ -1599,6 +1615,11 @@ async function roomSnapshot(roomId, telegramId) {
       currentPlayers: Number(players[0].count),
       prizePool: formatAmount(room.prize_pool),
       status: room.status,
+      selection: {
+        count: Number(selection.count),
+        totalCost: formatAmount(selection.total_cost),
+        remainingBalance: availableBalance,
+      },
       cartelas,
     },
     game: {
@@ -1628,12 +1649,11 @@ app.get('/health', async (_req, res) => {
 app.post('/api/admin/rooms', authenticatedTelegramUser, adminOnly, async (req, res, next) => {
   try {
     await upsertUser(req.telegramUser);
-    const stake = validDepositAmount(req.body?.stake);
     const minPlayers = Number(req.body?.minPlayers);
     const maxPlayers = Number(req.body?.maxPlayers);
-    if (!stake || minPlayers < 2 || !Number.isInteger(minPlayers) || maxPlayers < minPlayers
+    if (minPlayers < 2 || !Number.isInteger(minPlayers) || maxPlayers < minPlayers
       || maxPlayers > 100 || !Number.isInteger(maxPlayers)) {
-      return res.status(400).json({ error: 'Provide a positive stake and player limits (minimum 2, maximum 100). minPlayers must not exceed maxPlayers.' });
+      return res.status(400).json({ error: 'Player limits must be integers from 2 to 100, and minimum players cannot exceed maximum players.' });
     }
     const connection = await pool.getConnection();
     let roomId;
@@ -1642,7 +1662,7 @@ app.post('/api/admin/rooms', authenticatedTelegramUser, adminOnly, async (req, r
       const [created] = await connection.execute(
         `INSERT INTO bingo_rooms (room_number, stake, min_players, max_players, created_by)
          VALUES ('pending', ?, ?, ?, ?)`,
-        [stake, minPlayers, maxPlayers, String(req.telegramUser.id)],
+        [cartelaPrice, minPlayers, maxPlayers, String(req.telegramUser.id)],
       );
       roomId = String(created.insertId);
       const slots = Array.from({ length: 100 }, (_, index) => [
@@ -1657,7 +1677,7 @@ app.post('/api/admin/rooms', authenticatedTelegramUser, adminOnly, async (req, r
     } finally {
       connection.release();
     }
-    res.status(201).json({ room: { id: roomId, roomNumber: roomId, stake, minPlayers, maxPlayers, status: 'WAITING' } });
+    res.status(201).json({ room: { id: roomId, roomNumber: roomId, stake: cartelaPrice, minPlayers, maxPlayers, status: 'WAITING' } });
   } catch (error) {
     next(error);
   }
@@ -1668,8 +1688,8 @@ app.get('/api/rooms', authenticatedTelegramUser, async (_req, res, next) => {
     await initializeSchema();
     const [rooms] = await pool.execute(
       `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
-         (SELECT COUNT(DISTINCT s.owner_telegram_id) FROM cartela_slots s
-          WHERE s.room_id = r.id AND s.owner_telegram_id IS NOT NULL) AS current_players
+         (SELECT COUNT(*) FROM bingo_players p
+          WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players
        FROM bingo_rooms r WHERE r.status IN ('WAITING', 'PLAYING') ORDER BY r.created_at DESC`,
     );
     const [myRooms] = await pool.execute(
@@ -1785,7 +1805,7 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
        WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
       [room.id, String(req.telegramUser.id)],
     );
-    if (Number(count.count) >= 2) throw Object.assign(new Error('You can select at most two cartelas in one room.'), { status: 400 });
+    if (Number(count.count) >= 2) throw Object.assign(new Error('Maximum 2 cartelas allowed per room.'), { status: 400 });
     const [[wallet]] = await connection.execute(
       'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
       [String(req.telegramUser.id)],
@@ -1794,7 +1814,7 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
     const available = await getAvailableBalance(String(req.telegramUser.id), connection);
     const cost = decimalToMinorUnits(room.stake);
     if (decimalToMinorUnits(available) < cost) {
-      throw Object.assign(new Error('Insufficient available wallet balance.'), { status: 400 });
+      throw Object.assign(new Error('Insufficient balance. Please deposit funds to continue.'), { status: 400 });
     }
     const before = decimalToMinorUnits(wallet.balance);
     const after = before - cost;
@@ -2070,6 +2090,9 @@ app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
         played: Number(gameStats.played),
         won: Number(gameStats.won),
         winnings: formatAmount(gameStats.winnings),
+        winRate: Number(gameStats.played)
+          ? (Number(gameStats.won) / Number(gameStats.played) * 100).toFixed(1)
+          : '0.0',
       },
     });
   } catch (error) {
@@ -2085,13 +2108,16 @@ app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
       `SELECT r.id AS room_id, r.status,
          COALESCE(r.finished_at, r.started_at, r.created_at) AS created_at,
          GROUP_CONCAT(DISTINCT cr.cartela_number ORDER BY cr.cartela_number) AS cartelas,
+         COALESCE(SUM(cr.amount), 0.00) AS stake,
          COALESCE((SELECT SUM(w.prize) FROM game_winners w
-                   WHERE w.room_id = r.id AND w.telegram_id = ?), 0.00) AS prize
+                   WHERE w.room_id = r.id AND w.telegram_id = ?), 0.00) AS prize,
+         (SELECT GROUP_CONCAT(DISTINCT w.pattern ORDER BY w.pattern)
+          FROM game_winners w WHERE w.room_id = r.id AND w.telegram_id = ?) AS patterns
        FROM cartela_reservations cr JOIN bingo_rooms r ON r.id = cr.room_id
        WHERE cr.telegram_id = ? AND r.status IN ('PLAYING', 'FINISHED')
        GROUP BY r.id, r.status, r.finished_at, r.started_at, r.created_at
        ORDER BY created_at DESC LIMIT 100`,
-      [String(req.telegramUser.id), String(req.telegramUser.id)],
+      [String(req.telegramUser.id), String(req.telegramUser.id), String(req.telegramUser.id)],
     );
     res.json({
       games: games.map((row) => ({
@@ -2099,6 +2125,8 @@ app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
         status: row.status,
         result: decimalToMinorUnits(row.prize) > 0n ? 'WON' : row.status === 'FINISHED' ? 'PLAYED' : row.status,
         prize: formatAmount(row.prize),
+        stake: formatAmount(row.stake),
+        pattern: row.patterns || null,
         cartelas: row.cartelas ? row.cartelas.split(',').map(Number) : [],
         createdAt: row.created_at,
       })),
@@ -2653,15 +2681,24 @@ app.post('/telegram/webhook', async (req, res, next) => {
 });
 
 app.get('/', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
   res.type('html').send(reactMiniAppHtml);
 });
 
 app.get('/mini-app.js', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
   res.sendFile(path.join(__dirname, 'public', 'mini-app.js'));
 });
 
 app.use((error, _req, res, _next) => {
-  console.error('Request failed:', error.message);
+  console.error(JSON.stringify({
+    event: 'request_failed',
+    requestId: _req.requestId,
+    userId: _req.telegramUser ? String(_req.telegramUser.id) : undefined,
+    route: _req.path,
+    code: error.code || 'REQUEST_FAILED',
+    status: Number.isInteger(error.status) ? error.status : 500,
+  }));
   if (res.headersSent) return;
   const status = Number.isInteger(error.status) ? error.status : 500;
   res.status(status).json({
