@@ -295,27 +295,38 @@ app.post('/admin/setup', async (req, res, next) => {
       return res.status(401).json({ error: 'Unauthorized.' });
     }
     const webhookUrl = `${config.publicUrl}/telegram/webhook`;
-    await telegramApi('setWebhook', {
-      url: webhookUrl,
-      secret_token: config.webhookSecret,
-      allowed_updates: ['message', 'callback_query'],
-      drop_pending_updates: false,
-    });
-    await telegramApi('setChatMenuButton', {
-      menu_button: {
-        type: 'web_app',
-        text: 'SHISHO BINGO',
-        web_app: { url: config.appUrl },
-      },
-    });
-    await telegramApi('setMyCommands', {
-      commands: [
-        { command: 'start', description: 'Open SHISHO BINGO' },
-        { command: 'play', description: 'Open the Bingo Mini App' },
-        { command: 'balance', description: 'View your wallet balance' },
-        { command: 'language', description: 'Change language' },
-      ],
-    });
+    let step = 'setWebhook';
+    try {
+      await telegramApi(step, {
+        url: webhookUrl,
+        secret_token: config.webhookSecret,
+        allowed_updates: ['message', 'callback_query'],
+        drop_pending_updates: false,
+      });
+      step = 'setChatMenuButton';
+      await telegramApi(step, {
+        menu_button: {
+          type: 'web_app',
+          text: 'SHISHO BINGO',
+          web_app: { url: config.appUrl },
+        },
+      });
+      step = 'setMyCommands';
+      await telegramApi(step, {
+        commands: [
+          { command: 'start', description: 'Open SHISHO BINGO' },
+          { command: 'play', description: 'Open the Bingo Mini App' },
+          { command: 'balance', description: 'View your wallet balance' },
+          { command: 'language', description: 'Change language' },
+        ],
+      });
+    } catch (error) {
+      console.error(`Telegram setup failed during ${step}:`, error.message);
+      return res.status(502).json({
+        error: `Telegram setup failed during ${step}.`,
+        detail: error.message,
+      });
+    }
     res.json({ ok: true, webhook: webhookUrl, menuButton: 'configured' });
   } catch (error) {
     next(error);
