@@ -20,6 +20,13 @@ if (process.env.WEBHOOK_SECRET === process.env.SETUP_SECRET) {
   throw new Error('WEBHOOK_SECRET and SETUP_SECRET must be different values.');
 }
 
+function validConfiguredMoney(value) {
+  if (!/^\d{1,16}(?:\.\d{1,2})?$/.test(value)) {
+    throw new Error('REFERRAL_REWARD must be a non-negative amount with at most two decimal places.');
+  }
+  return value;
+}
+
 const config = {
   botToken: process.env.BOT_TOKEN,
   adminId: String(process.env.ADMIN_TELEGRAM_ID),
@@ -27,8 +34,12 @@ const config = {
   setupSecret: process.env.SETUP_SECRET,
   appUrl: process.env.MINI_APP_URL.replace(/\/+$/, ''),
   publicUrl: (process.env.WEBHOOK_BASE_URL || process.env.MINI_APP_URL).replace(/\/+$/, ''),
+  botUsername: (process.env.BOT_USERNAME || '').replace(/^@/, ''),
   supportUsername: (process.env.SUPPORT_USERNAME || '').replace(/^@/, ''),
-  channelUrl: process.env.SUPPORT_CHANNEL_URL || '',
+  channelUrl: process.env.CHANNEL_URL || process.env.SUPPORT_CHANNEL_URL || '',
+  supportUrl: process.env.SUPPORT_URL || '',
+  channelChatId: process.env.CHANNEL_CHAT_ID || '',
+  requireChannelMembership: process.env.REQUIRE_CHANNEL_MEMBERSHIP === 'true',
   dbHost: process.env.DATABASE_HOST,
   dbPort: Number(process.env.DATABASE_PORT || 4000),
   dbUser: process.env.DATABASE_USER,
@@ -48,6 +59,8 @@ const config = {
       accountName: process.env.CBE_ACCOUNT_NAME || '',
     },
   ].filter((method) => method.account && method.accountName),
+  withdrawalMinimum: '50.00',
+  referralReward: validConfiguredMoney(process.env.REFERRAL_REWARD || '0'),
 };
 
 const pool = mysql.createPool({
@@ -120,6 +133,84 @@ function initializeSchema() {
           CONSTRAINT fk_transaction_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      const [referralColumn] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'referral_code'`,
+      );
+      if (!Number(referralColumn[0].count)) {
+        try {
+          await pool.query('ALTER TABLE users ADD COLUMN referral_code VARCHAR(16) NULL');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
+      const [referralIndex] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.statistics
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uq_users_referral_code'`,
+      );
+      if (!Number(referralIndex[0].count)) {
+        try {
+          await pool.query('CREATE UNIQUE INDEX uq_users_referral_code ON users (referral_code)');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_KEYNAME' && error.errno !== 1061) throw error;
+        }
+      }
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS referral_relationships (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          referrer_telegram_id BIGINT UNSIGNED NOT NULL,
+          referred_telegram_id BIGINT UNSIGNED NOT NULL,
+          referral_code VARCHAR(16) NOT NULL,
+          status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+          reward_amount DECIMAL(20, 2) NOT NULL DEFAULT 0.00,
+          qualified_at TIMESTAMP NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_referral_referred (referred_telegram_id),
+          KEY idx_referral_referrer_status (referrer_telegram_id, status),
+          CONSTRAINT fk_referral_referrer FOREIGN KEY (referrer_telegram_id) REFERENCES users (telegram_id),
+          CONSTRAINT fk_referral_referred FOREIGN KEY (referred_telegram_id) REFERENCES users (telegram_id)
+        ) ENGINE=InnoDB
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS withdrawal_requests (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          telegram_id BIGINT UNSIGNED NOT NULL,
+          idempotency_key VARCHAR(64) NOT NULL,
+          amount DECIMAL(20, 2) NOT NULL,
+          payout_method VARCHAR(24) NOT NULL,
+          payout_details VARCHAR(191) NOT NULL,
+          status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+          reviewed_by BIGINT UNSIGNED NULL,
+          reviewed_at TIMESTAMP NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_withdrawal_idempotency (idempotency_key),
+          KEY idx_withdrawal_user_created (telegram_id, created_at),
+          KEY idx_withdrawal_status_created (status, created_at),
+          CONSTRAINT fk_withdrawal_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
+        ) ENGINE=InnoDB
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_flows (
+          telegram_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+          flow VARCHAR(24) NOT NULL,
+          step VARCHAR(32) NOT NULL,
+          data JSON NOT NULL,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          CONSTRAINT fk_flow_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
+        ) ENGINE=InnoDB
+      `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS admin_audit_logs (
+          id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          admin_telegram_id BIGINT UNSIGNED NOT NULL,
+          action VARCHAR(64) NOT NULL,
+          entity_type VARCHAR(32) NOT NULL,
+          entity_id BIGINT UNSIGNED NOT NULL,
+          details VARCHAR(255) NOT NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          KEY idx_admin_audit_created (created_at)
+        ) ENGINE=InnoDB
+      `);
     })().catch((error) => {
       schemaPromise = undefined;
       throw error;
@@ -134,12 +225,13 @@ const text = {
     menu: 'Choose an option below. Open Play for the Mini App.',
     play: '🎮 Play',
     balance: '💰 Balance',
-    deposit: '➕ Deposit',
+    deposit: '💳 Deposit',
     withdraw: '💸 Withdraw',
-    invite: '🎁 Invite',
+    invite: '🔗 Invite',
     profile: '👤 Profile',
     history: '📜 History',
-    support: '🆘 Support',
+    support: '💬 Support',
+    channel: '📢 Channel',
     language: '🌐 Language',
     wallet: (amount) => `Your wallet balance is ${amount} BIRR.`,
     walletError: 'I could not load your wallet right now. Please try again shortly.',
@@ -150,18 +242,46 @@ const text = {
     chooseLanguage: 'Choose your language:',
     languageSaved: 'Language updated.',
     supportInfo: 'For help, contact the support team.',
+    channelUnavailable: 'The official channel link is not configured yet.',
+    choosePaymentMethod: 'Choose a deposit method:',
+    enterDepositAmount: 'Enter the amount in BIRR.',
+    enterDepositReference: 'Enter the transaction/reference ID from your payment.',
+    withdrawalInfo: (balance, minimum) => `Available balance: ${balance} BIRR\nMinimum withdrawal: ${minimum} BIRR\nFee: 0 BIRR\nPending requests reserve their amount until approved or rejected.\n\nEnter the amount to withdraw, or Cancel.`,
+    withdrawalMethod: 'Choose how you want to receive the withdrawal:',
+    withdrawalDetails: 'Enter your Telebirr phone number or CBE account details.',
+    withdrawalConfirm: (amount, method, details) => `Confirm withdrawal request:\nAmount: ${amount} BIRR\nFee: 0 BIRR\nMethod: ${method}\nAccount: ${details}`,
+    withdrawalPending: (id) => `Withdrawal request #${id} is pending admin review. The requested funds are reserved; no payout has been made yet.`,
+    withdrawalDisabled: 'Withdrawals are currently unavailable.',
+    cancelled: 'Request cancelled.',
+    invalidAmount: 'Enter a valid positive amount with up to two decimal places.',
+    insufficientFunds: 'That amount exceeds your available balance after pending withdrawal reservations.',
+    minimumWithdrawal: (minimum) => `The minimum withdrawal is ${minimum} BIRR.`,
+    profileTitle: '👤 YOUR PROFILE',
+    historyEmpty: 'No wallet transactions yet.',
+    inviteInfo: (url, count) => `🔗 Invite friends to SHISHO BINGO\n\nYour invite link:\n${url}\n\nSuccessful referrals: ${count}\nReferral reward, if enabled, is granted after your invited friend’s first approved deposit.`,
+    supportPrompt: 'What do you need help with?',
+    channelJoin: 'Join the official SHISHO BINGO channel, then verify your membership.',
+    channelVerified: 'Channel membership verified.',
+    channelNotMember: 'You are not yet a member of the official channel.',
+    channelVerifyUnavailable: 'Channel membership verification is not configured. You can still join using the channel link.',
+    depositApproved: (amount, balance) => `✅ Deposit approved\n${amount} BIRR added to your wallet.\nNew balance: ${balance} BIRR.`,
+    depositRejected: (id) => `❌ Deposit request #${id} was rejected. Your wallet was not changed.`,
+    withdrawalApproved: (amount, balance) => `✅ Withdrawal request approved for ${amount} BIRR. The payout has been confirmed by the administrator.\nWallet balance: ${balance} BIRR.`,
+    withdrawalRejected: (id) => `❌ Withdrawal request #${id} was rejected. Reserved funds are available in your wallet again.`,
+    adminOnly: 'This action is available only to the configured administrator.',
   },
   am: {
     welcome: (name) => `ወደ SHISHO BINGO እንኳን ደህና መጡ፣ ${name}!`,
     menu: 'ከታች ያለውን ይምረጡ። ሚኒ አፑን ለመክፈት ጨዋታን ይጫኑ።',
     play: '🎮 ጨዋታ',
     balance: '💰 ቀሪ ሂሳብ',
-    deposit: '➕ ገንዘብ አስገባ',
+    deposit: '💳 ገንዘብ አስገባ',
     withdraw: '💸 ገንዘብ አውጣ',
-    invite: '🎁 ጋብዝ',
+    invite: '🔗 ጋብዝ',
     profile: '👤 መገለጫ',
     history: '📜 ታሪክ',
-    support: '🆘 ድጋፍ',
+    support: '💬 ድጋፍ',
+    channel: '📢 ቻናል',
     language: '🌐 ቋንቋ',
     wallet: (amount) => `የኪስ ቦርሳዎ ቀሪ ሂሳብ ${amount} ብር ነው።`,
     walletError: 'የኪስ ቦርሳውን አሁን ማሳየት አልቻልኩም። እባክዎ ቆይተው ይሞክሩ።',
@@ -172,6 +292,33 @@ const text = {
     chooseLanguage: 'ቋንቋዎን ይምረጡ፦',
     languageSaved: 'ቋንቋው ተቀይሯል።',
     supportInfo: 'ለእርዳታ የድጋፍ ቡድኑን ያነጋግሩ።',
+    channelUnavailable: 'የኦፊሴላዊው ቻናል አድራሻ ገና አልተዘጋጀም።',
+    choosePaymentMethod: 'የገንዘብ ማስገቢያ ዘዴ ይምረጡ፦',
+    enterDepositAmount: 'መጠኑን በብር ያስገቡ።',
+    enterDepositReference: 'ከክፍያዎ የግብይት መለያ ያስገቡ።',
+    withdrawalInfo: (balance, minimum) => `ያለ ቀሪ ሂሳብ፦ ${balance} ብር\nዝቅተኛ የማውጫ መጠን፦ ${minimum} ብር\nክፍያ፦ 0 ብር\nየሚጠባበቁ ጥያቄዎች እስኪጸድቁ ወይም ውድቅ እስኪደረጉ ድረስ ገንዘቡን ይይዛሉ።\n\nለማውጣት የሚፈልጉትን መጠን ያስገቡ ወይም Cancel ይጫኑ።`,
+    withdrawalMethod: 'ገንዘቡን የሚቀበሉበትን ዘዴ ይምረጡ፦',
+    withdrawalDetails: 'የቴሌብር ስልክ ቁጥርዎን ወይም የCBE ሂሳብ ያስገቡ።',
+    withdrawalConfirm: (amount, method, details) => `የገንዘብ ማውጫ ጥያቄውን ያረጋግጡ፦\nመጠን፦ ${amount} ብር\nክፍያ፦ 0 ብር\nዘዴ፦ ${method}\nሂሳብ፦ ${details}`,
+    withdrawalPending: (id) => `የማውጫ ጥያቄ #${id} የአስተዳዳሪ ግምገማ እየጠበቀ ነው። ገንዘቡ ተይዟል፤ ክፍያ ገና አልተፈጸመም።`,
+    withdrawalDisabled: 'የገንዘብ ማውጫ አገልግሎት ለጊዜው ዝግ ነው።',
+    cancelled: 'ጥያቄው ተሰርዟል።',
+    invalidAmount: 'ትክክለኛ አዎንታዊ መጠን እስከ ሁለት የአስርዮሽ ቦታ ያስገቡ።',
+    insufficientFunds: 'ይህ መጠን ከተያዙ ገንዘቦች በኋላ ካለው ቀሪ ሂሳብ ይበልጣል።',
+    minimumWithdrawal: (minimum) => `ዝቅተኛው የማውጫ መጠን ${minimum} ብር ነው።`,
+    profileTitle: '👤 የእርስዎ መገለጫ',
+    historyEmpty: 'ገና የኪስ ቦርሳ ግብይቶች የሉም።',
+    inviteInfo: (url, count) => `🔗 ጓደኞችዎን ወደ SHISHO BINGO ይጋብዙ።\n\nየግብዣ አገናኝዎ፦\n${url}\n\nየተሳኩ ግብዣዎች፦ ${count}\nሽልማት ከነቃ በተጋበዘው ሰው የመጀመሪያ የጸደቀ ገንዘብ ማስገባት በኋላ ይሰጣል።`,
+    supportPrompt: 'እርዳታ የሚፈልጉበትን ይምረጡ።',
+    channelJoin: 'ወደ ኦፊሴላዊው SHISHO BINGO ቻናል ይቀላቀሉ፣ ከዚያ አባልነትዎን ያረጋግጡ።',
+    channelVerified: 'የቻናል አባልነት ተረጋግጧል።',
+    channelNotMember: 'እስካሁን የኦፊሴላዊው ቻናል አባል አይደሉም።',
+    channelVerifyUnavailable: 'የቻናል አባልነት ማረጋገጫ አልተዘጋጀም። አሁንም በአገናኙ መቀላቀል ይችላሉ።',
+    depositApproved: (amount, balance) => `✅ ገንዘብ ማስገባት ጸድቋል።\n${amount} ብር ወደ ኪስ ቦርሳዎ ተጨምሯል።\nአዲስ ቀሪ ሂሳብ፦ ${balance} ብር።`,
+    depositRejected: (id) => `❌ የገንዘብ ማስገቢያ ጥያቄ #${id} ውድቅ ተደርጓል። ቀሪ ሂሳብዎ አልተቀየረም።`,
+    withdrawalApproved: (amount, balance) => `✅ የ${amount} ብር ማውጫ ጥያቄ ጸድቋል። አስተዳዳሪው ክፍያውን አረጋግጠዋል።\nቀሪ ሂሳብ፦ ${balance} ብር።`,
+    withdrawalRejected: (id) => `❌ የማውጫ ጥያቄ #${id} ውድቅ ተደርጓል። የተያዘው ገንዘብ ወደ ቀሪ ሂሳብዎ ተመልሷል።`,
+    adminOnly: 'ይህ እርምጃ ለተዋቀረው አስተዳዳሪ ብቻ ነው።',
   },
 };
 
@@ -209,10 +356,11 @@ function keyboardFor(lang) {
   return {
     keyboard: [
       [{ text: t.play, web_app: { url: config.appUrl } }],
-      [{ text: t.balance }, { text: t.deposit }],
-      [{ text: t.withdraw }, { text: t.invite }],
-      [{ text: t.profile }, { text: t.history }],
-      [{ text: t.support }, { text: t.language }],
+      [{ text: t.balance }, { text: t.profile }],
+      [{ text: t.deposit }, { text: t.withdraw }],
+      [{ text: t.invite }, { text: t.support }],
+      [{ text: t.channel }],
+      [{ text: t.language }],
     ],
     resize_keyboard: true,
     is_persistent: true,
@@ -234,18 +382,95 @@ async function upsertUser(user) {
     [id, username, firstName, lastName, defaultLanguage],
   );
   await pool.execute('INSERT IGNORE INTO wallets (telegram_id) VALUES (?)', [id]);
+  await ensureReferralCode(id);
   return { id, firstName, username };
+}
+
+async function ensureReferralCode(telegramId) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const code = crypto.randomBytes(9).toString('base64url').slice(0, 12);
+    try {
+      await pool.execute(
+        'UPDATE users SET referral_code = ? WHERE telegram_id = ? AND referral_code IS NULL',
+        [code, String(telegramId)],
+      );
+      const [rows] = await pool.execute('SELECT referral_code FROM users WHERE telegram_id = ?', [String(telegramId)]);
+      if (!rows[0]?.referral_code) throw new Error('Could not assign a referral code to the user.');
+      return rows[0].referral_code;
+    } catch (error) {
+      if (error.code !== 'ER_DUP_ENTRY' || attempt === 4) throw error;
+    }
+  }
+  throw new Error('Could not assign a unique referral code.');
+}
+
+async function attributeReferral(newUserId, startPayload) {
+  const match = /^ref_([A-Za-z0-9_-]{6,16})$/.exec(String(startPayload || ''));
+  if (!match) return false;
+  const [referrers] = await pool.execute(
+    'SELECT telegram_id FROM users WHERE referral_code = ? LIMIT 1',
+    [match[1]],
+  );
+  const referrerId = referrers[0] ? String(referrers[0].telegram_id) : '';
+  if (!referrerId || referrerId === String(newUserId)) return false;
+  try {
+    await pool.execute(
+      `INSERT INTO referral_relationships
+        (referrer_telegram_id, referred_telegram_id, referral_code, reward_amount)
+       VALUES (?, ?, ?, ?)`,
+      [referrerId, String(newUserId), match[1], config.referralReward],
+    );
+    return true;
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') return false;
+    throw error;
+  }
 }
 
 async function getUser(id) {
   await initializeSchema();
   const [rows] = await pool.execute(
-    `SELECT u.telegram_id, u.username, u.first_name, u.last_name, u.language, w.balance
+    `SELECT u.telegram_id, u.username, u.first_name, u.last_name, u.language, u.referral_code, w.balance
      FROM users u JOIN wallets w ON w.telegram_id = u.telegram_id
      WHERE u.telegram_id = ? LIMIT 1`,
     [String(id)],
   );
   return rows[0] || null;
+}
+
+async function getAvailableBalance(telegramId, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT w.balance,
+       COALESCE((SELECT SUM(r.amount) FROM withdrawal_requests r
+                 WHERE r.telegram_id = w.telegram_id AND r.status = 'PENDING'), 0.00) AS reserved
+     FROM wallets w WHERE w.telegram_id = ?`,
+    [String(telegramId)],
+  );
+  if (!rows[0]) throw new Error('Wallet not found.');
+  const available = decimalToMinorUnits(rows[0].balance) - decimalToMinorUnits(rows[0].reserved);
+  return minorUnitsToDecimal(available);
+}
+
+async function getUserFlow(telegramId) {
+  const [rows] = await pool.execute('SELECT flow, step, data FROM user_flows WHERE telegram_id = ?', [String(telegramId)]);
+  if (!rows[0]) return null;
+  return {
+    flow: rows[0].flow,
+    step: rows[0].step,
+    data: typeof rows[0].data === 'string' ? JSON.parse(rows[0].data) : rows[0].data,
+  };
+}
+
+async function setUserFlow(telegramId, flow, step, data) {
+  await pool.execute(
+    `INSERT INTO user_flows (telegram_id, flow, step, data) VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE flow = VALUES(flow), step = VALUES(step), data = VALUES(data)`,
+    [String(telegramId), flow, step, JSON.stringify(data)],
+  );
+}
+
+async function clearUserFlow(telegramId) {
+  await pool.execute('DELETE FROM user_flows WHERE telegram_id = ?', [String(telegramId)]);
 }
 
 function decimalToMinorUnits(value) {
@@ -283,6 +508,29 @@ function depositReviewKeyboard(id) {
   };
 }
 
+function withdrawalReviewKeyboard(id) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Confirm paid & approve', callback_data: `withdraw:approve:${id}` },
+      { text: '❌ Reject', callback_data: `withdraw:reject:${id}` },
+    ]],
+  };
+}
+
+function supportKeyboard(lang) {
+  const t = text[lang];
+  return {
+    inline_keyboard: [
+      [{ text: '💳 ' + t.deposit.replace(/^💳\s*/, ''), callback_data: 'help:deposits' },
+        { text: '💸 ' + t.withdraw.replace(/^💸\s*/, ''), callback_data: 'help:withdrawals' }],
+      [{ text: '💰 ' + t.balance.replace(/^💰\s*/, ''), callback_data: 'help:wallet' },
+        { text: '🎟 Cartelas', callback_data: 'help:cartela' }],
+      [{ text: '🎮 Game rules', callback_data: 'help:rules' },
+        { text: '🛠 Technical', callback_data: 'help:technical' }],
+    ],
+  };
+}
+
 async function notifyAdminOfDeposit(request) {
   const user = await getUser(request.telegramId);
   const message = [
@@ -301,6 +549,192 @@ async function notifyAdminOfDeposit(request) {
     text: message,
     reply_markup: depositReviewKeyboard(request.id),
   });
+}
+
+async function notifyAdminOfWithdrawal(request) {
+  const user = await getUser(request.telegramId);
+  const message = [
+    '💸 NEW WITHDRAWAL REQUEST',
+    '',
+    `Request: #${request.id}`,
+    `User: ${user?.first_name || 'Player'}${user?.username ? ` (@${user.username})` : ''}`,
+    `Telegram ID: ${request.telegramId}`,
+    `Amount: ${request.amount} BIRR`,
+    `Payment method: ${request.method}`,
+    `Account: ${request.details}`,
+    `Available balance: ${request.availableBalance} BIRR`,
+    'Status: PENDING — verify payout before approval.',
+  ].join('\n');
+  await telegramApi('sendMessage', {
+    chat_id: config.adminId,
+    text: message,
+    reply_markup: withdrawalReviewKeyboard(request.id),
+  });
+}
+
+async function createWithdrawalRequest(telegramId, amountInput, method, detailsInput, idempotencyKey) {
+  const amount = validDepositAmount(amountInput);
+  const details = typeof detailsInput === 'string' ? detailsInput.trim() : '';
+  if (!amount) throw Object.assign(new Error(text.en.invalidAmount), { status: 400 });
+  if (decimalToMinorUnits(amount) < decimalToMinorUnits(config.withdrawalMinimum)) {
+    throw Object.assign(new Error(text.en.minimumWithdrawal(config.withdrawalMinimum)), { status: 400 });
+  }
+  if (!/^[A-Za-z0-9_-]{24,64}$/.test(String(idempotencyKey || '')) ||
+      !['TELEBIRR', 'CBE'].includes(method) || details.length < 5 || details.length > 191 ||
+      /[\u0000-\u001f\u007f]/.test(details)) {
+    throw Object.assign(new Error('Choose Telebirr or CBE and provide valid payout details.'), { status: 400 });
+  }
+
+  const connection = await pool.getConnection();
+  let request;
+  try {
+    await connection.beginTransaction();
+    const [wallets] = await connection.execute(
+      'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+      [String(telegramId)],
+    );
+    if (!wallets[0]) throw new Error('Wallet not found.');
+    const availableBalance = await getAvailableBalance(telegramId, connection);
+    if (decimalToMinorUnits(amount) > decimalToMinorUnits(availableBalance)) {
+      throw Object.assign(new Error(text.en.insufficientFunds), { status: 400 });
+    }
+    const [insert] = await connection.execute(
+      `INSERT INTO withdrawal_requests (telegram_id, idempotency_key, amount, payout_method, payout_details)
+       VALUES (?, ?, ?, ?, ?)`,
+      [String(telegramId), idempotencyKey, amount, method, details],
+    );
+    request = {
+      id: String(insert.insertId),
+      telegramId: String(telegramId),
+      amount,
+      method,
+      details,
+      availableBalance,
+    };
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    if (error.code === 'ER_DUP_ENTRY') {
+      const [existing] = await pool.execute(
+        `SELECT id, amount, payout_method FROM withdrawal_requests WHERE idempotency_key = ? LIMIT 1`,
+        [idempotencyKey],
+      );
+      if (existing[0]) {
+        return {
+          id: String(existing[0].id),
+          telegramId: String(telegramId),
+          amount: formatAmount(existing[0].amount),
+          method: existing[0].payout_method,
+          notificationSent: true,
+          duplicate: true,
+        };
+      }
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  try {
+    await notifyAdminOfWithdrawal(request);
+    request.notificationSent = true;
+  } catch (error) {
+    console.error(`Admin notification failed for withdrawal #${request.id}:`, error.message);
+    request.notificationSent = false;
+  }
+  return request;
+}
+
+async function reviewWithdrawal(id, decision, adminId, reason = '') {
+  const connection = await pool.getConnection();
+  let outcome;
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.execute(
+      `SELECT id, telegram_id, amount, status FROM withdrawal_requests WHERE id = ? FOR UPDATE`,
+      [id],
+    );
+    const request = rows[0];
+    if (!request) {
+      await connection.rollback();
+      return { found: false };
+    }
+    if (request.status !== 'PENDING') {
+      await connection.commit();
+      return { found: true, status: request.status, changed: false };
+    }
+
+    let balanceAfter = null;
+    if (decision === 'APPROVED') {
+      const [wallets] = await connection.execute(
+        'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+        [String(request.telegram_id)],
+      );
+      if (!wallets[0]) throw new Error(`Wallet not found for withdrawal ${id}.`);
+      const balanceBefore = formatAmount(wallets[0].balance);
+      if (decimalToMinorUnits(balanceBefore) < decimalToMinorUnits(request.amount)) {
+        throw new Error(`Wallet balance is insufficient to approve withdrawal ${id}.`);
+      }
+      balanceAfter = minorUnitsToDecimal(
+        decimalToMinorUnits(balanceBefore) - decimalToMinorUnits(request.amount),
+      );
+      await connection.execute(
+        'UPDATE wallets SET balance = ? WHERE telegram_id = ?',
+        [balanceAfter, String(request.telegram_id)],
+      );
+      await connection.execute(
+        `INSERT INTO wallet_transactions
+          (telegram_id, type, amount, balance_before, balance_after, reference_id, description)
+         VALUES (?, 'WITHDRAWAL', ?, ?, ?, ?, ?)`,
+        [
+          String(request.telegram_id),
+          formatAmount(request.amount),
+          balanceBefore,
+          balanceAfter,
+          String(request.id),
+          `Approved withdrawal #${request.id}`,
+        ],
+      );
+    }
+    await connection.execute(
+      `UPDATE withdrawal_requests SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND status = 'PENDING'`,
+      [decision, String(adminId), id],
+    );
+    await connection.execute(
+      `INSERT INTO admin_audit_logs (admin_telegram_id, action, entity_type, entity_id, details)
+       VALUES (?, ?, 'WITHDRAWAL', ?, ?)`,
+      [String(adminId), decision, String(id), (reason || `Withdrawal ${decision.toLowerCase()}`).slice(0, 255)],
+    );
+    await connection.commit();
+    outcome = {
+      found: true,
+      status: decision,
+      changed: true,
+      telegramId: String(request.telegram_id),
+      amount: formatAmount(request.amount),
+      balanceAfter,
+    };
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+
+  if (outcome.changed) {
+    const user = await getUser(outcome.telegramId);
+    const lang = languageOf(user?.language);
+    const message = decision === 'APPROVED'
+      ? text[lang].withdrawalApproved(outcome.amount, outcome.balanceAfter)
+      : `${text[lang].withdrawalRejected(id)}${reason ? `\nReason: ${reason}` : ''}`;
+    try {
+      await telegramApi('sendMessage', { chat_id: outcome.telegramId, text: message });
+    } catch (error) {
+      console.error(`User notification failed for withdrawal #${id}:`, error.message);
+    }
+  }
+  return outcome;
 }
 
 async function createDepositRequest(telegramUser, method, amountInput, providerReferenceInput) {
@@ -341,7 +775,7 @@ async function createDepositRequest(telegramUser, method, amountInput, providerR
   return result;
 }
 
-async function reviewDeposit(id, decision, adminId) {
+async function reviewDeposit(id, decision, adminId, reason = '') {
   const connection = await pool.getConnection();
   let outcome;
   try {
@@ -388,11 +822,57 @@ async function reviewDeposit(id, decision, adminId) {
           `Approved deposit #${deposit.id}`,
         ],
       );
+      const [qualified] = await connection.execute(
+        `UPDATE referral_relationships SET status = 'QUALIFIED', qualified_at = CURRENT_TIMESTAMP
+         WHERE referred_telegram_id = ? AND status = 'PENDING'`,
+        [String(deposit.telegram_id)],
+      );
+      if (qualified.affectedRows) {
+        const [referralRows] = await connection.execute(
+          `SELECT id, referrer_telegram_id, reward_amount
+           FROM referral_relationships WHERE referred_telegram_id = ?`,
+          [String(deposit.telegram_id)],
+        );
+        const referral = referralRows[0];
+        if (referral && decimalToMinorUnits(referral.reward_amount) > 0n) {
+          const [referrerWallets] = await connection.execute(
+            'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+            [String(referral.referrer_telegram_id)],
+          );
+          if (!referrerWallets[0]) throw new Error(`Referrer wallet missing for referral ${referral.id}.`);
+          const before = formatAmount(referrerWallets[0].balance);
+          const after = minorUnitsToDecimal(
+            decimalToMinorUnits(before) + decimalToMinorUnits(referral.reward_amount),
+          );
+          await connection.execute(
+            'UPDATE wallets SET balance = ? WHERE telegram_id = ?',
+            [after, String(referral.referrer_telegram_id)],
+          );
+          await connection.execute(
+            `INSERT INTO wallet_transactions
+              (telegram_id, type, amount, balance_before, balance_after, reference_id, description)
+             VALUES (?, 'REFERRAL_REWARD', ?, ?, ?, ?, ?)`,
+            [
+              String(referral.referrer_telegram_id),
+              formatAmount(referral.reward_amount),
+              before,
+              after,
+              String(referral.id),
+              `Referral reward for referral #${referral.id}`,
+            ],
+          );
+        }
+      }
     }
     await connection.execute(
       `UPDATE deposit_requests SET status = ?, reviewed_by = ?, reviewed_at = CURRENT_TIMESTAMP
        WHERE id = ? AND status = 'PENDING'`,
       [decision, adminId, id],
+    );
+    await connection.execute(
+      `INSERT INTO admin_audit_logs (admin_telegram_id, action, entity_type, entity_id, details)
+       VALUES (?, ?, 'DEPOSIT', ?, ?)`,
+      [String(adminId), decision, String(id), (reason || `Deposit ${decision.toLowerCase()}`).slice(0, 255)],
     );
     await connection.commit();
     outcome = {
@@ -413,13 +893,9 @@ async function reviewDeposit(id, decision, adminId) {
   if (outcome.changed) {
     const user = await getUser(outcome.telegramId);
     const lang = languageOf(user?.language);
-    const notice = lang === 'am'
-      ? decision === 'APPROVED'
-        ? `✅ የገንዘብ ማስገቢያ ጸድቋል።\n${outcome.amount} ብር ወደ ኪስ ቦርሳዎ ተጨምሯል።\nአዲስ ቀሪ ሂሳብ፦ ${outcome.balanceAfter} ብር።`
-        : `❌ የገንዘብ ማስገቢያ ጥያቄ #${id} ውድቅ ተደርጓል። ቀሪ ሂሳብዎ አልተቀየረም።`
-      : decision === 'APPROVED'
-        ? `✅ Deposit approved\n${outcome.amount} BIRR has been added to your wallet.\nNew balance: ${outcome.balanceAfter} BIRR.`
-        : `❌ Deposit request #${id} was rejected. Your wallet was not changed.`;
+    const notice = decision === 'APPROVED'
+      ? text[lang].depositApproved(outcome.amount, outcome.balanceAfter)
+      : `${text[lang].depositRejected(id)}${reason ? `\nReason: ${reason}` : ''}`;
     try {
       await telegramApi('sendMessage', { chat_id: outcome.telegramId, text: notice });
     } catch (error) {
@@ -437,6 +913,353 @@ async function pendingDeposits(limit = 10) {
      WHERE d.status = 'PENDING' ORDER BY d.created_at ASC LIMIT ${Number(limit)}`,
   );
   return rows;
+}
+
+async function pendingWithdrawals(limit = 10) {
+  await initializeSchema();
+  const [rows] = await pool.query(
+    `SELECT r.id, r.telegram_id, r.amount, r.payout_method, r.payout_details, u.first_name, u.username
+     FROM withdrawal_requests r JOIN users u ON u.telegram_id = r.telegram_id
+     WHERE r.status = 'PENDING' ORDER BY r.created_at ASC LIMIT ${Number(limit)}`,
+  );
+  return rows;
+}
+
+async function getProfile(telegramId) {
+  const user = await getUser(telegramId);
+  if (!user) throw new Error('User profile not found.');
+  const availableBalance = await getAvailableBalance(telegramId);
+  const [[referrals]] = await pool.execute(
+    `SELECT COUNT(*) AS total,
+       SUM(CASE WHEN status = 'QUALIFIED' THEN 1 ELSE 0 END) AS qualified
+     FROM referral_relationships WHERE referrer_telegram_id = ?`,
+    [String(telegramId)],
+  );
+  const [[wins]] = await pool.execute(
+    `SELECT COUNT(*) AS total, COALESCE(SUM(amount), 0.00) AS winnings
+     FROM wallet_transactions WHERE telegram_id = ? AND type = 'GAME_WIN'`,
+    [String(telegramId)],
+  );
+  return {
+    user,
+    availableBalance,
+    referralCount: Number(referrals.qualified || 0),
+    referralInvites: Number(referrals.total || 0),
+    gamesWon: Number(wins.total || 0),
+    winnings: formatAmount(wins.winnings || '0.00'),
+  };
+}
+
+async function getWalletHistory(telegramId, limit = 10) {
+  const [rows] = await pool.query(
+    `SELECT type, amount, balance_after, description, created_at
+     FROM wallet_transactions WHERE telegram_id = ?
+     ORDER BY created_at DESC LIMIT ${Number(limit)}`,
+    [String(telegramId)],
+  );
+  return rows;
+}
+
+function walletActionsKeyboard(lang) {
+  return {
+    inline_keyboard: [
+      [{ text: text[lang].deposit, callback_data: 'wallet:deposit' },
+        { text: text[lang].withdraw, callback_data: 'wallet:withdraw' }],
+      [{ text: '🔄 Refresh balance', callback_data: 'wallet:refresh' }],
+    ],
+  };
+}
+
+async function sendDepositChoices(chatId, lang) {
+  if (!config.paymentMethods.length) {
+    return telegramApi('sendMessage', { chat_id: chatId, text: text[lang].depositDisabled });
+  }
+  return telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: text[lang].choosePaymentMethod,
+    reply_markup: {
+      inline_keyboard: config.paymentMethods.map((method) => [{
+        text: method.label,
+        callback_data: `deposit:method:${method.method}`,
+      }]).concat([[{ text: '❌ Cancel', callback_data: 'flow:cancel' }]]),
+    },
+  });
+}
+
+async function beginWithdrawal(chatId, telegramId, lang) {
+  const available = await getAvailableBalance(telegramId);
+  if (decimalToMinorUnits(available) < decimalToMinorUnits(config.withdrawalMinimum)) {
+    return telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: `${text[lang].withdrawalInfo(available, config.withdrawalMinimum)}\n\n${text[lang].minimumWithdrawal(config.withdrawalMinimum)}`,
+      reply_markup: keyboardFor(lang),
+    });
+  }
+  await setUserFlow(telegramId, 'withdrawal', 'amount', {
+    idempotencyKey: crypto.randomBytes(24).toString('base64url'),
+  });
+  return telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: text[lang].withdrawalInfo(available, config.withdrawalMinimum),
+    reply_markup: {
+      inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
+    },
+  });
+}
+
+async function getInviteDetails(telegramId) {
+  const [code, [[row]]] = await Promise.all([
+    ensureReferralCode(telegramId),
+    pool.execute(
+      `SELECT COUNT(*) AS successful
+       FROM referral_relationships WHERE referrer_telegram_id = ? AND status = 'QUALIFIED'`,
+      [String(telegramId)],
+    ),
+  ]);
+  if (!config.botUsername) {
+    const bot = await telegramApi('getMe');
+    config.botUsername = bot.username;
+  }
+  return {
+    url: `https://t.me/${config.botUsername}?start=ref_${code}`,
+    count: Number(row.successful || 0),
+  };
+}
+
+async function sendHistory(chatId, telegramId, lang) {
+  const rows = await getWalletHistory(telegramId);
+  if (!rows.length) {
+    return telegramApi('sendMessage', { chat_id: chatId, text: text[lang].historyEmpty });
+  }
+  const lines = rows.map((row) => {
+    const date = new Date(row.created_at).toISOString().replace('T', ' ').slice(0, 16);
+    const sign = ['DEPOSIT', 'GAME_WIN', 'GAME_REFUND', 'REFERRAL_REWARD', 'ADMIN_ADJUSTMENT'].includes(row.type) ? '+' : '-';
+    return `${date} · ${row.type} · ${sign}${formatAmount(row.amount)} BIRR · balance ${formatAmount(row.balance_after)} BIRR`;
+  });
+  return telegramApi('sendMessage', { chat_id: chatId, text: `📜 Wallet history\n\n${lines.join('\n')}` });
+}
+
+async function sendProfile(chatId, telegramId, lang) {
+  const profile = await getProfile(telegramId);
+  const user = profile.user;
+  const displayName = [user.first_name, user.last_name].filter(Boolean).join(' ');
+  const username = user.username ? `@${user.username}` : 'Not set';
+  const message = [
+    text[lang].profileTitle,
+    '',
+    `Name: ${displayName}`,
+    `Username: ${username}`,
+    `Telegram ID: ${user.telegram_id}`,
+    `Available balance: ${profile.availableBalance} BIRR`,
+    `Successful referrals: ${profile.referralCount}`,
+    `Games played: Not available — game service is not implemented.`,
+    `Games won: ${profile.gamesWon}`,
+    `Total game winnings: ${profile.winnings} BIRR`,
+  ].join('\n');
+  return telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: message,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: text[lang].play, callback_data: 'profile:play' },
+        { text: text[lang].history, callback_data: 'profile:history' },
+      ]],
+    },
+  });
+}
+
+async function sendPlayEntry(chatId, telegramId, lang) {
+  if (config.requireChannelMembership) {
+    const membership = await channelMembership(telegramId);
+    if (!membership.member) {
+      const buttons = [];
+      if (config.channelUrl) buttons.push({ text: '📢 Join channel', url: config.channelUrl });
+      if (config.channelChatId) buttons.push({ text: '✅ Verify membership', callback_data: 'channel:verify' });
+      return telegramApi('sendMessage', {
+        chat_id: chatId,
+        text: membership.verifiable
+          ? text[lang].channelJoin
+          : text[lang].channelVerifyUnavailable,
+        ...(buttons.length ? { reply_markup: { inline_keyboard: [buttons] } } : {}),
+      });
+    }
+  }
+  return telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: 'Open the Shisho Bingo lobby. Active rooms appear there when the game service is available.',
+    reply_markup: {
+      inline_keyboard: [[{ text: text[lang].play, web_app: { url: config.appUrl } }]],
+    },
+  });
+}
+
+async function channelMembership(telegramId) {
+  if (!config.channelUrl) return { configured: false, member: false };
+  if (!config.channelChatId) return { configured: true, member: false, verifiable: false };
+  try {
+    const member = await telegramApi('getChatMember', {
+      chat_id: config.channelChatId,
+      user_id: String(telegramId),
+    });
+    return {
+      configured: true,
+      verifiable: true,
+      member: ['creator', 'administrator', 'member'].includes(member.status) ||
+        (member.status === 'restricted' && member.is_member === true),
+    };
+  } catch (error) {
+    console.error('Channel membership check failed:', error.message);
+    return { configured: true, verifiable: false };
+  }
+}
+
+function isMenuText(input, lang) {
+  const t = text[lang];
+  return [t.play, t.balance, t.profile, t.deposit, t.withdraw, t.invite, t.support, t.channel, t.language]
+    .includes(input);
+}
+
+async function handleAdminRejectFlow(message, user, lang) {
+  const flow = await getUserFlow(user.id);
+  if (flow?.flow !== 'admin_reject' || String(user.id) !== config.adminId) return false;
+  const reason = String(message.text || '').trim();
+  if (/^\/cancel$/i.test(reason)) {
+    await clearUserFlow(user.id);
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: 'Rejection cancelled. The request remains pending.',
+      reply_markup: keyboardFor(lang),
+    });
+    return true;
+  }
+  if (reason.length < 3 || reason.length > 255 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(reason)) {
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: 'Please enter a short rejection reason (3–255 characters), or send /cancel.',
+    });
+    return true;
+  }
+  const result = flow.data.entity === 'DEPOSIT'
+    ? await reviewDeposit(flow.data.id, 'REJECTED', config.adminId, reason)
+    : await reviewWithdrawal(flow.data.id, 'REJECTED', config.adminId, reason);
+  await clearUserFlow(user.id);
+  await telegramApi('sendMessage', {
+    chat_id: message.chat.id,
+    text: result.changed
+      ? `${flow.data.entity} #${flow.data.id} rejected.`
+      : result.found
+        ? `${flow.data.entity} #${flow.data.id} was already ${result.status.toLowerCase()}.`
+        : `${flow.data.entity} #${flow.data.id} was not found.`,
+    reply_markup: keyboardFor(lang),
+  });
+  return true;
+}
+
+async function handleUserFlow(message, user, lang) {
+  const flow = await getUserFlow(user.id);
+  if (!flow) return false;
+  const input = String(message.text || '').trim();
+  if (/^\/cancel$/i.test(input) || input === '❌ Cancel' || input === '❌ ሰርዝ') {
+    await clearUserFlow(user.id);
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: text[lang].cancelled,
+      reply_markup: keyboardFor(lang),
+    });
+    return true;
+  }
+  if (isMenuText(input, lang) || /^\/(?:start|play|balance|deposit|withdraw|language|profile|history|invite|support|channel)(?:@\w+)?(?:\s|$)/i.test(input)) {
+    await clearUserFlow(user.id);
+    return false;
+  }
+
+  if (flow.flow === 'deposit' && flow.step === 'amount') {
+    const amount = validDepositAmount(input);
+    if (!amount) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].invalidAmount });
+      return true;
+    }
+    await setUserFlow(user.id, 'deposit', 'reference', { method: flow.data.method, amount });
+    await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].enterDepositReference });
+    return true;
+  }
+  if (flow.flow === 'deposit' && flow.step === 'reference') {
+    let request;
+    try {
+      request = await createDepositRequest(
+        { id: Number(user.id), first_name: user.firstName, username: user.username },
+        flow.data.method,
+        flow.data.amount,
+        input,
+      );
+    } catch (error) {
+      if ([400, 409].includes(error.status)) {
+        await telegramApi('sendMessage', { chat_id: message.chat.id, text: error.message });
+        return true;
+      }
+      throw error;
+    }
+    await clearUserFlow(user.id);
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: text[lang].depositPending + `\nRequest #${request.id}.` +
+        (request.notificationSent ? '' : '\nAdmin notification failed; the request is saved. Ask the admin to use /pendingdeposits.'),
+      reply_markup: keyboardFor(lang),
+    });
+    return true;
+  }
+  if (flow.flow === 'withdrawal' && flow.step === 'amount') {
+    const amount = validDepositAmount(input);
+    if (!amount) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].invalidAmount });
+      return true;
+    }
+    if (decimalToMinorUnits(amount) < decimalToMinorUnits(config.withdrawalMinimum)) {
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: text[lang].minimumWithdrawal(config.withdrawalMinimum),
+      });
+      return true;
+    }
+    const availableBalance = await getAvailableBalance(user.id);
+    if (decimalToMinorUnits(amount) > decimalToMinorUnits(availableBalance)) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].insufficientFunds });
+      return true;
+    }
+    await setUserFlow(user.id, 'withdrawal', 'method', { ...flow.data, amount });
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: text[lang].withdrawalMethod,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: 'Telebirr', callback_data: 'withdraw:method:TELEBIRR' },
+          { text: 'CBE', callback_data: 'withdraw:method:CBE' },
+        ], [{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
+      },
+    });
+    return true;
+  }
+  if (flow.flow === 'withdrawal' && flow.step === 'details') {
+    const details = input.slice(0, 191);
+    if (details.length < 5 || /[\u0000-\u001f\u007f]/.test(details)) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].withdrawalDetails });
+      return true;
+    }
+    const data = { ...flow.data, details };
+    await setUserFlow(user.id, 'withdrawal', 'confirm', data);
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: text[lang].withdrawalConfirm(data.amount, data.method, data.details),
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Confirm request', callback_data: 'withdraw:confirm' },
+          { text: '❌ Cancel', callback_data: 'withdraw:cancel' },
+        ]],
+      },
+    });
+    return true;
+  }
+  return false;
 }
 
 function verifyInitData(initData) {
@@ -502,6 +1325,7 @@ app.get('/api/me', authenticatedTelegramUser, async (req, res, next) => {
     const identity = await upsertUser(req.telegramUser);
     const user = await getUser(identity.id);
     if (!user) throw new Error('Wallet record was not created.');
+    const availableBalance = await getAvailableBalance(identity.id);
     res.json({
       user: {
         id: String(user.telegram_id),
@@ -509,7 +1333,7 @@ app.get('/api/me', authenticatedTelegramUser, async (req, res, next) => {
         username: user.username,
         language: user.language,
       },
-      wallet: { balance: String(user.balance), currency: 'BIRR' },
+      wallet: { balance: availableBalance, currency: 'BIRR' },
       features: { deposits: config.paymentMethods.length > 0, withdrawals: false, liveGames: false },
     });
   } catch (error) {
@@ -525,6 +1349,52 @@ app.get('/api/deposit-options', authenticatedTelegramUser, async (_req, res) => 
   });
 });
 
+app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
+  try {
+    const profile = await getProfile(req.telegramUser.id);
+    res.json({
+      user: {
+        id: String(profile.user.telegram_id),
+        firstName: profile.user.first_name,
+        lastName: profile.user.last_name,
+        username: profile.user.username,
+        language: profile.user.language,
+      },
+      wallet: { availableBalance: profile.availableBalance, currency: 'BIRR' },
+      referrals: { successful: profile.referralCount, total: profile.referralInvites },
+      games: { played: null, won: profile.gamesWon, winnings: profile.winnings },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
+  try {
+    const transactions = await getWalletHistory(req.telegramUser.id);
+    res.json({
+      transactions: transactions.map((row) => ({
+        type: row.type,
+        amount: formatAmount(row.amount),
+        balanceAfter: formatAmount(row.balance_after),
+        description: row.description,
+        createdAt: row.created_at,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/referrals', authenticatedTelegramUser, async (req, res, next) => {
+  try {
+    const invite = await getInviteDetails(req.telegramUser.id);
+    res.json({ referralUrl: invite.url, successful: invite.count });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.post('/api/deposits', authenticatedTelegramUser, async (req, res, next) => {
   try {
     const request = await createDepositRequest(
@@ -534,6 +1404,25 @@ app.post('/api/deposits', authenticatedTelegramUser, async (req, res, next) => {
       req.body?.providerReference,
     );
     res.status(201).json({
+      request: { id: request.id, status: 'PENDING', amount: request.amount, method: request.method },
+      adminNotified: request.notificationSent,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/withdrawals', authenticatedTelegramUser, async (req, res, next) => {
+  try {
+    await upsertUser(req.telegramUser);
+    const request = await createWithdrawalRequest(
+      String(req.telegramUser.id),
+      req.body?.amount,
+      req.body?.method,
+      req.body?.payoutDetails,
+      req.body?.idempotencyKey,
+    );
+    res.status(request.duplicate ? 200 : 201).json({
       request: { id: request.id, status: 'PENDING', amount: request.amount, method: request.method },
       adminNotified: request.notificationSent,
     });
@@ -586,7 +1475,32 @@ app.post('/admin/setup', async (req, res, next) => {
           { command: 'start', description: 'Open SHISHO BINGO' },
           { command: 'play', description: 'Open the Bingo Mini App' },
           { command: 'balance', description: 'View your wallet balance' },
-          { command: 'pendingdeposits', description: 'Admin: review pending deposits' },
+          { command: 'deposit', description: 'Submit a deposit for approval' },
+          { command: 'withdraw', description: 'Request a withdrawal' },
+          { command: 'profile', description: 'View your profile' },
+          { command: 'history', description: 'View wallet history' },
+          { command: 'invite', description: 'Invite friends' },
+          { command: 'support', description: 'Contact support' },
+          { command: 'channel', description: 'Join the official channel' },
+          { command: 'language', description: 'Change language' },
+        ],
+      });
+      step = 'setAdminCommands';
+      await telegramApi(step, {
+        scope: { type: 'chat', chat_id: config.adminId },
+        commands: [
+          { command: 'start', description: 'Open SHISHO BINGO' },
+          { command: 'play', description: 'Open the Bingo Mini App' },
+          { command: 'balance', description: 'View your wallet balance' },
+          { command: 'deposit', description: 'Submit a deposit for approval' },
+          { command: 'withdraw', description: 'Request a withdrawal' },
+          { command: 'profile', description: 'View your profile' },
+          { command: 'history', description: 'View wallet history' },
+          { command: 'invite', description: 'Invite friends' },
+          { command: 'support', description: 'Contact support' },
+          { command: 'channel', description: 'Join the official channel' },
+          { command: 'pendingdeposits', description: 'Review pending deposits' },
+          { command: 'pendingwithdrawals', description: 'Review pending withdrawals' },
           { command: 'language', description: 'Change language' },
         ],
       });
@@ -613,44 +1527,208 @@ app.post('/telegram/webhook', async (req, res, next) => {
       const callback = update.callback_query;
       const match = /^lang:(en|am)$/.exec(callback.data || '');
       if (match) {
-        await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
         const user = await upsertUser(callback.from);
         await pool.execute('UPDATE users SET language = ? WHERE telegram_id = ?', [match[1], user.id]);
+        await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: text[match[1]].languageSaved });
         await telegramApi('sendMessage', {
           chat_id: callback.message.chat.id,
           text: text[match[1]].languageSaved,
           reply_markup: keyboardFor(match[1]),
         });
       } else {
-        const reviewMatch = /^deposit:(approve|reject):(\d+)$/.exec(callback.data || '');
-        if (!reviewMatch) {
+        const data = String(callback.data || '');
+        const user = await upsertUser(callback.from);
+        const savedUser = await getUser(user.id);
+        const lang = languageOf(savedUser?.language);
+        const depositReview = /^deposit:(approve|reject):(\d+)$/.exec(data);
+        const withdrawalReview = /^withdraw:(approve|reject):(\d+)$/.exec(data);
+        const depositMethod = /^deposit:method:(TELEBIRR|CBE)$/.exec(data);
+        const withdrawalMethod = /^withdraw:method:(TELEBIRR|CBE)$/.exec(data);
+        const supportTopic = /^help:(deposits|withdrawals|wallet|cartela|rules|technical)$/.exec(data);
+
+        if (depositMethod) {
+          const option = config.paymentMethods.find((item) => item.method === depositMethod[1]);
+          if (!option) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: callback.id,
+              text: text[lang].depositDisabled,
+              show_alert: true,
+            });
+            return res.sendStatus(200);
+          }
+          await setUserFlow(user.id, 'deposit', 'amount', { method: option.method });
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
-          return res.sendStatus(200);
-        }
-        if (String(callback.from.id) !== config.adminId) {
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: `${option.label}\n${option.accountName}\n${option.account}\n\n${text[lang].enterDepositAmount}`,
+            reply_markup: {
+              inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'flow:cancel' }]],
+            },
+          });
+        } else if (withdrawalMethod) {
+          const flow = await getUserFlow(user.id);
+          if (flow?.flow !== 'withdrawal' || flow.step !== 'method') {
+            await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Start a new withdrawal request.', show_alert: true });
+            return res.sendStatus(200);
+          }
+          await setUserFlow(user.id, 'withdrawal', 'details', { ...flow.data, method: withdrawalMethod[1] });
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: text[lang].withdrawalDetails,
+            reply_markup: {
+              inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
+            },
+          });
+        } else if (data === 'flow:cancel' || data === 'withdraw:cancel') {
+          await clearUserFlow(user.id);
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: text[lang].cancelled });
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: text[lang].cancelled,
+            reply_markup: keyboardFor(lang),
+          });
+        } else if (data === 'withdraw:confirm') {
+          const flow = await getUserFlow(user.id);
+          if (flow?.flow !== 'withdrawal' || flow.step !== 'confirm') {
+            await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Start a new withdrawal request.', show_alert: true });
+            return res.sendStatus(200);
+          }
+          const request = await createWithdrawalRequest(
+            user.id,
+            flow.data.amount,
+            flow.data.method,
+            flow.data.details,
+            flow.data.idempotencyKey,
+          );
+          await clearUserFlow(user.id);
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: `Request #${request.id} submitted.` });
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: text[lang].withdrawalPending(request.id) +
+              (request.notificationSent ? '' : '\nAdmin notification failed; the request is saved. Ask the admin to use /pendingwithdrawals.'),
+            reply_markup: keyboardFor(lang),
+          });
+        } else if (supportTopic) {
+          const topic = supportTopic[1];
+          const topicText = {
+            deposits: 'Deposit help: check payment instructions and submit the transaction reference. Pending requests require admin approval.',
+            withdrawals: `Withdrawal help: minimum ${config.withdrawalMinimum} BIRR, no fee. Pending requests reserve funds until reviewed.`,
+            wallet: 'Wallet help: use 💰 Balance to refresh the TiDB-backed balance. Contact support if a transaction is missing.',
+            cartela: 'Cartela selection is not available until the persistent room and game service is implemented.',
+            rules: 'Bingo rooms and game rules are not available yet; no games or prizes are currently offered.',
+            technical: 'Technical help: describe the issue and include your Telegram username. Never send passwords, bot tokens, or payment PINs.',
+          }[topic];
+          const contactUrl = config.supportUrl ||
+            (config.supportUsername ? `https://t.me/${config.supportUsername}` : '');
+          const contact = config.supportUsername ? `\n\nContact @${config.supportUsername}.` : '';
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: topicText + contact,
+            ...(contactUrl ? {
+              reply_markup: { inline_keyboard: [[{ text: 'Contact support', url: contactUrl }]] },
+            } : {}),
+          });
+        } else if (data === 'channel:verify') {
+          const membership = await channelMembership(user.id);
+          const responseText = !membership.configured
+            ? text[lang].channelUnavailable
+            : membership.member
+              ? text[lang].channelVerified
+              : membership.verifiable
+                ? text[lang].channelNotMember
+                : text[lang].channelVerifyUnavailable;
           await telegramApi('answerCallbackQuery', {
             callback_query_id: callback.id,
-            text: 'Only the configured administrator can review deposits.',
-            show_alert: true,
+            text: responseText,
+            show_alert: !membership.member,
           });
-          return res.sendStatus(200);
-        }
-        const decision = reviewMatch[1] === 'approve' ? 'APPROVED' : 'REJECTED';
-        const outcome = await reviewDeposit(reviewMatch[2], decision, config.adminId);
-        const answer = !outcome.found ? 'Deposit request not found.'
-          : outcome.changed ? `Deposit ${outcome.status.toLowerCase()}.`
-            : `Already ${outcome.status.toLowerCase()}.`;
-        await telegramApi('answerCallbackQuery', {
-          callback_query_id: callback.id,
-          text: answer,
-          show_alert: !outcome.changed,
-        });
-        if (outcome.changed && callback.message) {
-          await telegramApi('editMessageReplyMarkup', {
+        } else if (data === 'wallet:refresh') {
+          const profile = await getProfile(user.id);
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Balance refreshed.' });
+          await telegramApi('sendMessage', {
             chat_id: callback.message.chat.id,
-            message_id: callback.message.message_id,
-            reply_markup: { inline_keyboard: [] },
+            text: text[lang].wallet(profile.availableBalance),
+            reply_markup: walletActionsKeyboard(lang),
           });
+        } else if (data === 'wallet:deposit') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await sendDepositChoices(callback.message.chat.id, lang);
+        } else if (data === 'wallet:withdraw') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await beginWithdrawal(callback.message.chat.id, user.id, lang);
+        } else if (data === 'profile:history') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await sendHistory(callback.message.chat.id, user.id, lang);
+        } else if (data === 'profile:play') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await sendPlayEntry(callback.message.chat.id, user.id, lang);
+        } else if (data === 'invite:share') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          const details = await getInviteDetails(user.id);
+          await telegramApi('sendMessage', {
+            chat_id: callback.message.chat.id,
+            text: `Share this invite link with friends: ${details.url}`,
+            reply_markup: {
+              inline_keyboard: [[{
+                text: '📤 Share invite',
+                url: `https://t.me/share/url?url=${encodeURIComponent(details.url)}`,
+              }]],
+            },
+          });
+        } else if (depositReview || withdrawalReview) {
+          if (String(callback.from.id) !== config.adminId) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: callback.id,
+              text: text[lang].adminOnly,
+              show_alert: true,
+            });
+            return res.sendStatus(200);
+          }
+          const matchReview = depositReview || withdrawalReview;
+          const decision = matchReview[1] === 'approve' ? 'APPROVED' : 'REJECTED';
+          if (decision === 'REJECTED') {
+            await setUserFlow(user.id, 'admin_reject', 'reason', {
+              entity: depositReview ? 'DEPOSIT' : 'WITHDRAWAL',
+              id: matchReview[2],
+            });
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: callback.id,
+              text: 'Enter the rejection reason in the admin chat.',
+            });
+            await telegramApi('sendMessage', {
+              chat_id: callback.message.chat.id,
+              text: `Enter a rejection reason for ${depositReview ? 'deposit' : 'withdrawal'} #${matchReview[2]}, or send /cancel.`,
+            });
+            await telegramApi('editMessageReplyMarkup', {
+              chat_id: callback.message.chat.id,
+              message_id: callback.message.message_id,
+              reply_markup: { inline_keyboard: [] },
+            });
+            return res.sendStatus(200);
+          }
+          const outcome = depositReview
+            ? await reviewDeposit(matchReview[2], decision, config.adminId)
+            : await reviewWithdrawal(matchReview[2], decision, config.adminId);
+          const answer = !outcome.found ? 'Request not found.'
+            : outcome.changed ? `Request ${outcome.status.toLowerCase()}.`
+              : `Already ${outcome.status.toLowerCase()}.`;
+          await telegramApi('answerCallbackQuery', {
+            callback_query_id: callback.id,
+            text: answer,
+            show_alert: !outcome.changed,
+          });
+          if (outcome.changed && callback.message) {
+            await telegramApi('editMessageReplyMarkup', {
+              chat_id: callback.message.chat.id,
+              message_id: callback.message.message_id,
+              reply_markup: { inline_keyboard: [] },
+            });
+          }
+        } else {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          return res.sendStatus(200);
         }
       }
       return res.sendStatus(200);
@@ -663,28 +1741,82 @@ app.post('/telegram/webhook', async (req, res, next) => {
     const lang = languageOf(savedUser?.language);
     const t = text[lang];
     const input = String(message.text || '').trim();
-    let reply = t.menu;
-    let extra = { reply_markup: keyboardFor(lang) };
+    const startMatch = /^\/start(?:@\w+)?(?:\s+(.+))?$/i.exec(input);
+    if (startMatch?.[1]) await attributeReferral(user.id, startMatch[1]);
+    if (await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
+    if (await handleUserFlow(message, user, lang)) return res.sendStatus(200);
 
-    if (/^\/start(?:@\w+)?(?:\s|$)/i.test(input)) {
-      reply = t.welcome(user.firstName) + '\n\n' + t.menu;
-      if (user.id === config.adminId) reply += '\n\nAdmin account detected.';
+    if (startMatch) {
+      let welcome = t.welcome(user.firstName) + '\n\n' + t.menu;
+      if (user.id === config.adminId) welcome += '\n\nAdmin tools: /pendingdeposits and /pendingwithdrawals';
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: welcome,
+        reply_markup: keyboardFor(lang),
+      });
     } else if (/^\/play(?:@\w+)?$/i.test(input) || input === t.play) {
-      reply = `${t.menu}\n\n${config.appUrl}`;
-      extra = {
-        reply_markup: {
-          inline_keyboard: [[{ text: t.play, web_app: { url: config.appUrl } }]],
-        },
-      };
+      await sendPlayEntry(message.chat.id, user.id, lang);
     } else if (/^\/balance(?:@\w+)?$/i.test(input) || input === t.balance) {
-      reply = t.wallet(savedUser.balance);
+      const profile = await getProfile(user.id);
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `💰 YOUR WALLET\n\nAvailable Balance: ${profile.availableBalance} BIRR`,
+        reply_markup: walletActionsKeyboard(lang),
+      });
+    } else if (input === t.profile || /^\/profile(?:@\w+)?$/i.test(input)) {
+      await sendProfile(message.chat.id, user.id, lang);
+    } else if (input === t.deposit || /^\/deposit(?:@\w+)?$/i.test(input)) {
+      await sendDepositChoices(message.chat.id, lang);
+    } else if (input === t.withdraw || /^\/withdraw(?:@\w+)?$/i.test(input)) {
+      await beginWithdrawal(message.chat.id, user.id, lang);
+    } else if (input === t.invite || /^\/invite(?:@\w+)?$/i.test(input)) {
+      const invite = await getInviteDetails(user.id);
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: t.inviteInfo(invite.url, invite.count),
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '📤 Share invite', url: `https://t.me/share/url?url=${encodeURIComponent(invite.url)}` },
+            { text: '📋 Copy invite link', copy_text: { text: invite.url } },
+          ]],
+        },
+      });
+    } else if (input === t.support || /^\/support(?:@\w+)?$/i.test(input)) {
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: t.supportPrompt,
+        reply_markup: supportKeyboard(lang),
+      });
+      const contactUrl = config.supportUrl ||
+        (config.supportUsername ? `https://t.me/${config.supportUsername}` : '');
+      if (contactUrl) {
+        await telegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: t.supportInfo,
+          reply_markup: { inline_keyboard: [[{ text: 'Contact support', url: contactUrl }]] },
+        });
+      }
+    } else if (input === t.channel || /^\/channel(?:@\w+)?$/i.test(input)) {
+      if (!config.channelUrl) {
+        await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.channelUnavailable });
+      } else {
+        const membership = await channelMembership(user.id);
+        const buttons = [{ text: '📢 Join channel', url: config.channelUrl }];
+        if (config.channelChatId) buttons.push({ text: '✅ Verify membership', callback_data: 'channel:verify' });
+        await telegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: membership.member ? t.channelVerified
+            : membership.verifiable ? t.channelJoin : `${t.channelJoin}\n\n${t.channelVerifyUnavailable}`,
+          reply_markup: { inline_keyboard: [buttons] },
+        });
+      }
     } else if (/^\/pendingdeposits(?:@\w+)?$/i.test(input)) {
       if (user.id !== config.adminId) {
-        reply = 'This command is for the administrator only.';
+        await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });
       } else {
         const requests = await pendingDeposits();
         if (!requests.length) {
-          reply = 'There are no pending deposit requests.';
+          await telegramApi('sendMessage', { chat_id: message.chat.id, text: 'There are no pending deposit requests.' });
         } else {
           for (const request of requests) {
             await telegramApi('sendMessage', {
@@ -701,46 +1833,58 @@ app.post('/telegram/webhook', async (req, res, next) => {
               reply_markup: depositReviewKeyboard(request.id),
             });
           }
-          reply = `Sent ${requests.length} pending request(s) for review.`;
         }
       }
-    } else if (/^\/language(?:@\w+)?$/i.test(input) || input === t.language) {
-      reply = text[lang].chooseLanguage;
-      extra = {
+    } else if (/^\/pendingwithdrawals(?:@\w+)?$/i.test(input)) {
+      if (user.id !== config.adminId) {
+        await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });
+      } else {
+        const requests = await pendingWithdrawals();
+        if (!requests.length) {
+          await telegramApi('sendMessage', { chat_id: message.chat.id, text: 'There are no pending withdrawal requests.' });
+        } else {
+          for (const request of requests) {
+            await telegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: [
+                '💸 PENDING WITHDRAWAL',
+                `Request: #${request.id}`,
+                `User: ${request.first_name}${request.username ? ` (@${request.username})` : ''}`,
+                `Telegram ID: ${request.telegram_id}`,
+                `Amount: ${formatAmount(request.amount)} BIRR`,
+                `Payment method: ${request.payout_method}`,
+                `Account: ${request.payout_details}`,
+                'Complete the external payout before using Confirm paid & approve.',
+              ].join('\n'),
+              reply_markup: withdrawalReviewKeyboard(request.id),
+            });
+          }
+        }
+      }
+    } else if (input === t.language || /^\/language(?:@\w+)?$/i.test(input)) {
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: t.chooseLanguage,
         reply_markup: {
           inline_keyboard: [[
             { text: '🇬🇧 English', callback_data: 'lang:en' },
             { text: '🇪🇹 አማርኛ', callback_data: 'lang:am' },
           ]],
         },
-      };
-    } else if (input === t.deposit || /^\/deposit(?:@\w+)?$/i.test(input)) {
-      if (!config.paymentMethods.length) {
-        reply = t.depositDisabled;
-      } else {
-        reply = 'Open the Mini App to submit a deposit request. Your wallet is credited only after admin approval.';
-        extra = {
-          reply_markup: {
-            inline_keyboard: [[{
-              text: t.deposit,
-              web_app: { url: `${config.appUrl}?startapp=deposit` },
-            }]],
-          },
-        };
-      }
-    } else if (input === t.withdraw || input === t.history) {
-      reply = t.notConfigured;
-    } else if (input === t.profile) {
-      reply = `${t.profile}\n${user.firstName}${user.username ? ` (@${user.username})` : ''}\nTelegram ID: ${user.id}`;
-    } else if (input === t.invite) {
-      const [bot] = await telegramApi('getMe');
-      reply = `Invite friends with this bot: https://t.me/${bot.username}?start=ref_${user.id}`;
-    } else if (input === t.support) {
-      reply = config.supportUsername ? `${t.supportInfo} @${config.supportUsername}` : t.supportInfo;
+      });
+    } else if (input === t.history || /^\/history(?:@\w+)?$/i.test(input)) {
+      await sendHistory(message.chat.id, user.id, lang);
+    } else if (/^\/cancel$/i.test(input)) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.cancelled, reply_markup: keyboardFor(lang) });
     } else if (/^\/help(?:@\w+)?$/i.test(input)) {
-      reply = t.menu;
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.menu, reply_markup: keyboardFor(lang) });
+    } else {
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: t.menu,
+        reply_markup: keyboardFor(lang),
+      });
     }
-    await telegramApi('sendMessage', { chat_id: message.chat.id, text: reply, ...extra });
     res.sendStatus(200);
   } catch (error) {
     next(error);
@@ -833,7 +1977,7 @@ const miniAppHtml = `<!doctype html>
       noRoomsTitle: 'Live rooms are not configured yet',
       noRoomsBody: 'Rooms and live Bingo will appear here once the persistent game service is set up. No sample rooms are shown.',
       yourWallet: 'Your wallet', availableBalance: 'Available balance',
-      walletInfo: 'Your balance is read from the same TiDB wallet used by the bot. Deposits and withdrawals are not enabled in this starter.',
+      walletInfo: 'Your balance is read from the same TiDB wallet used by the bot. Deposits require admin approval. Use the Telegram bot menu for withdrawals.',
       retry: 'Retry wallet', historyInfo: 'No financial or game history service has been configured.',
       depositTitle: 'Add funds',
       depositInstructions: 'Make the payment to the account shown below, then enter its transaction reference. Your wallet is credited only after an administrator approves it.',
@@ -857,7 +2001,7 @@ const miniAppHtml = `<!doctype html>
       noRoomsTitle: 'የቀጥታ ጨዋታ ክፍሎች ገና አልተዘጋጁም',
       noRoomsBody: 'የጨዋታ ክፍሎች እና ቢንጎ የሚታዩት የጨዋታ አገልግሎቱ ሲዘጋጅ ነው። የሙከራ ክፍሎች አይታዩም።',
       yourWallet: 'የእርስዎ የኪስ ቦርሳ', availableBalance: 'ያለው ቀሪ ሂሳብ',
-      walletInfo: 'ቀሪ ሂሳቡ ቦቱ ከሚጠቀምበት ተመሳሳይ TiDB የኪስ ቦርሳ ይነበባል። ገንዘብ ማስገባትና ማውጣት ገና አልተከፈተም።',
+      walletInfo: 'ቀሪ ሂሳቡ ቦቱ ከሚጠቀምበት ተመሳሳይ TiDB የኪስ ቦርሳ ይነበባል። ገንዘብ ማስገባት የአስተዳዳሪ ፈቃድ ይፈልጋል። ለማውጣት የቴሌግራም ቦት ሜኑን ይጠቀሙ።',
       retry: 'እንደገና ሞክር', historyInfo: 'የገንዘብ ወይም የጨዋታ ታሪክ አገልግሎት ገና አልተዘጋጀም።',
       depositTitle: 'ገንዘብ ጨምር',
       depositInstructions: 'ከታች ወደሚታየው ሂሳብ ክፍያ ይፈጽሙና የግብይት መለያውን ያስገቡ። አስተዳዳሪ ካጸደቀው በኋላ ብቻ ወደ ኪስ ቦርሳዎ ይጨመራል።',
