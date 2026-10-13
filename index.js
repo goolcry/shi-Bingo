@@ -78,6 +78,9 @@ const pool = mysql.createPool({
   decimalNumbers: false,
 });
 const cartelaPrice = '10.00';
+const roomMinPlayers = 2;
+const roomMaxPlayers = 20;
+const maxCartelasPerPlayer = 3;
 
 let schemaPromise;
 function initializeSchema() {
@@ -231,6 +234,12 @@ function initializeSchema() {
           CONSTRAINT fk_room_creator FOREIGN KEY (created_by) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS bingo_lobby_lock (
+          id TINYINT UNSIGNED NOT NULL PRIMARY KEY
+        ) ENGINE=InnoDB
+      `);
+      await pool.execute('INSERT IGNORE INTO bingo_lobby_lock (id) VALUES (1)');
       await pool.query(`
         CREATE TABLE IF NOT EXISTS bingo_players (
           room_id BIGINT UNSIGNED NOT NULL,
@@ -1430,6 +1439,45 @@ function generateCartela() {
   return card;
 }
 
+async function ensureOpenRoom(creatorTelegramId) {
+  await initializeSchema();
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.execute('SELECT id FROM bingo_lobby_lock WHERE id = 1 FOR UPDATE');
+    const [available] = await connection.execute(
+      `SELECT r.id FROM bingo_rooms r
+       WHERE r.status = 'WAITING'
+         AND (SELECT COUNT(*) FROM bingo_players p
+              WHERE p.room_id = r.id AND p.left_at IS NULL) < r.max_players
+       ORDER BY r.created_at ASC
+       LIMIT 1`,
+    );
+    if (available.length) {
+      await connection.commit();
+      return String(available[0].id);
+    }
+    const [inserted] = await connection.execute(
+      `INSERT INTO bingo_rooms (room_number, stake, min_players, max_players, created_by)
+       VALUES ('pending', ?, ?, ?, ?)`,
+      [cartelaPrice, roomMinPlayers, roomMaxPlayers, String(creatorTelegramId)],
+    );
+    const roomId = String(inserted.insertId);
+    const slots = Array.from({ length: 100 }, (_, index) => [
+      roomId, index + 1, JSON.stringify(generateCartela()),
+    ]);
+    await connection.query('INSERT INTO cartela_slots (room_id, cartela_number, numbers) VALUES ?', [slots]);
+    await connection.execute('UPDATE bingo_rooms SET room_number = ? WHERE id = ?', [roomId, roomId]);
+    await connection.commit();
+    return roomId;
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 function parseCartela(value) {
   const parsed = typeof value === 'string' ? JSON.parse(value) : value;
   if (!Array.isArray(parsed) || parsed.length !== 25) throw new Error('Stored cartela data is invalid.');
@@ -1646,57 +1694,29 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-app.post('/api/admin/rooms', authenticatedTelegramUser, adminOnly, async (req, res, next) => {
-  try {
-    await upsertUser(req.telegramUser);
-    const minPlayers = Number(req.body?.minPlayers);
-    const maxPlayers = Number(req.body?.maxPlayers);
-    if (minPlayers < 2 || !Number.isInteger(minPlayers) || maxPlayers < minPlayers
-      || maxPlayers > 100 || !Number.isInteger(maxPlayers)) {
-      return res.status(400).json({ error: 'Player limits must be integers from 2 to 100, and minimum players cannot exceed maximum players.' });
-    }
-    const connection = await pool.getConnection();
-    let roomId;
-    try {
-      await connection.beginTransaction();
-      const [created] = await connection.execute(
-        `INSERT INTO bingo_rooms (room_number, stake, min_players, max_players, created_by)
-         VALUES ('pending', ?, ?, ?, ?)`,
-        [cartelaPrice, minPlayers, maxPlayers, String(req.telegramUser.id)],
-      );
-      roomId = String(created.insertId);
-      const slots = Array.from({ length: 100 }, (_, index) => [
-        roomId, index + 1, JSON.stringify(generateCartela()),
-      ]);
-      await connection.query('INSERT INTO cartela_slots (room_id, cartela_number, numbers) VALUES ?', [slots]);
-      await connection.execute('UPDATE bingo_rooms SET room_number = ? WHERE id = ?', [`${roomId}`, roomId]);
-      await connection.commit();
-    } catch (error) {
-      await connection.rollback();
-      throw error;
-    } finally {
-      connection.release();
-    }
-    res.status(201).json({ room: { id: roomId, roomNumber: roomId, stake: cartelaPrice, minPlayers, maxPlayers, status: 'WAITING' } });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get('/api/rooms', authenticatedTelegramUser, async (_req, res, next) => {
+app.get('/api/rooms', authenticatedTelegramUser, async (req, res, next) => {
   try {
     await initializeSchema();
+    await upsertUser(req.telegramUser);
+    await ensureOpenRoom(String(req.telegramUser.id));
     const [rooms] = await pool.execute(
       `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
          (SELECT COUNT(*) FROM bingo_players p
           WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players
-       FROM bingo_rooms r WHERE r.status IN ('WAITING', 'PLAYING') ORDER BY r.created_at DESC`,
+       FROM bingo_rooms r
+       WHERE r.status = 'WAITING'
+          OR (r.status = 'PLAYING' AND EXISTS (
+            SELECT 1 FROM bingo_players mine
+            WHERE mine.room_id = r.id AND mine.telegram_id = ? AND mine.left_at IS NULL
+          ))
+       ORDER BY r.created_at DESC`,
+      [String(req.telegramUser.id)],
     );
     const [myRooms] = await pool.execute(
       `SELECT id FROM bingo_rooms r JOIN bingo_players p ON p.room_id = r.id
        WHERE p.telegram_id = ? AND p.left_at IS NULL AND r.status IN ('WAITING', 'PLAYING')
        ORDER BY p.joined_at DESC LIMIT 1`,
-      [String(_req.telegramUser.id)],
+      [String(req.telegramUser.id)],
     );
     res.json({
       myRoom: myRooms[0] ? String(myRooms[0].id) : null,
@@ -1805,7 +1825,9 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
        WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
       [room.id, String(req.telegramUser.id)],
     );
-    if (Number(count.count) >= 2) throw Object.assign(new Error('Maximum 2 cartelas allowed per room.'), { status: 400 });
+    if (Number(count.count) >= maxCartelasPerPlayer) {
+      throw Object.assign(new Error(`Maximum ${maxCartelasPerPlayer} cartelas allowed per room.`), { status: 400 });
+    }
     const [[wallet]] = await connection.execute(
       'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
       [String(req.telegramUser.id)],

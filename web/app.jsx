@@ -20,8 +20,8 @@ const words = {
   en: {
     play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', settings: 'Settings', welcome: 'Play. Win. Enjoy!',
     balance: 'Balance', refresh: 'Refresh', rooms: 'Available rooms', roomEmpty: 'No waiting rooms are open right now.',
-    retry: 'Retry', join: 'Join room', cards: 'Select cartelas', available: 'Available', selected: 'Yours',
-    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to two cartelas. Funds are charged only after the server confirms your selection.',
+    retry: 'Retry', join: 'JOIN +', cards: 'Select cartelas', available: 'Available', selected: 'Yours',
+    taken: 'Taken', count: 'Selected', stake: 'Cost per cartela', total: 'Total', selectHelp: 'Choose up to three cartelas. Funds are charged only after the server confirms your selection.',
     back: 'Back', game: 'Bingo game', recent: 'Recent calls', callBoard: 'Number board', leave: 'Leave room',
     noHistory: 'No game history yet.', noRanks: 'Rankings will appear after completed games.',
     deposit: 'Deposit', withdraw: 'Withdraw', share: 'Share invite', copy: 'Copy invite link',
@@ -33,7 +33,7 @@ const words = {
     play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
     balance: 'ቀሪ ሂሳብ', refresh: 'አድስ', rooms: 'ያሉ ክፍሎች', roomEmpty: 'አሁን የሚጠባበቅ ክፍል የለም።',
     retry: 'እንደገና ሞክር', join: 'ወደ ክፍል ግባ', cards: 'ካርቴላ ይምረጡ', available: 'ያለ', selected: 'የእርስዎ', taken: 'ተይዟል',
-    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሁለት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
+    count: 'የተመረጡ', stake: 'የአንድ ካርቴላ ዋጋ', total: 'ጠቅላላ', selectHelp: 'እስከ ሶስት ካርቴላ ይምረጡ። አገልጋዩ ካረጋገጠ በኋላ ብቻ ገንዘብ ይቆረጣል።',
     back: 'ተመለስ', game: 'የቢንጎ ጨዋታ', recent: 'የቅርብ ጥሪዎች', callBoard: 'ቁጥር ሰሌዳ', leave: 'ከክፍሉ ውጣ',
     noHistory: 'ገና የጨዋታ ታሪክ የለም።', noRanks: 'ጨዋታዎች ሲጠናቀቁ ደረጃዎች ይታያሉ።',
     deposit: 'ገንዘብ አስገባ', withdraw: 'ገንዘብ አውጣ', share: 'ግብዣ አጋራ', copy: 'የግብዣ አገናኝ ቅዳ',
@@ -70,7 +70,6 @@ function App() {
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
   const [ranks, setRanks] = useState([]);
-  const [admin, setAdmin] = useState(false);
   const [referral, setReferral] = useState(null);
   const [appInfo, setAppInfo] = useState(null);
   const [error, setError] = useState('');
@@ -84,7 +83,6 @@ function App() {
     const data = await request('/api/me');
     setUser(data.user);
     setWallet(data.wallet.balance);
-    setAdmin(Boolean(data.features?.admin));
     setLang(data.user.language === 'am' ? 'am' : 'en');
   }, [request]);
 
@@ -167,6 +165,14 @@ function App() {
       .catch((reason) => { if (active) setError(reason.message); });
     return () => { active = false; };
   }, [initData, telegramChecked, telegramDiagnostic, refreshWallet, refreshRooms, loadRoom]);
+
+  useEffect(() => {
+    if (!initData || view !== 'play') return undefined;
+    const timer = window.setInterval(() => {
+      refreshRooms().catch((reason) => setError(reason.message));
+    }, 8000);
+    return () => window.clearInterval(timer);
+  }, [initData, view, refreshRooms]);
 
   useEffect(() => {
     if (!room?.id || !['cartelas', 'game'].includes(view)) return undefined;
@@ -304,22 +310,8 @@ function App() {
       setBusy(false);
     }
 
-    async function createRoom(settings) {
-      setBusy(true);
-      try {
-        const result = await request('/api/admin/rooms', { method: 'POST', body: settings });
-        await refreshRooms();
-        setView('play');
-        setError('');
-        return result.room;
-      } finally {
-        setBusy(false);
-      }
-    }
   }
 
-  const selectedCards = room?.cartelas?.filter((card) => card.state === 'MINE') || [];
-  const stake = room?.stake || '10.00';
   const gameNumbers = game?.calledNumbers || [];
   const calledSet = useMemo(() => new Set(gameNumbers.map(Number)), [gameNumbers]);
 
@@ -356,7 +348,7 @@ function App() {
       {view === 'winner' && <WinnerScreen game={game} room={room} t={t} onBack={() => go('play')} />}
       {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
-      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} admin={admin} referral={referral} appInfo={appInfo} onCreateRoom={createRoom} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
+      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
       {view === 'wallet' && <WalletScreen wallet={wallet} t={t} onRefresh={() => Promise.all([refreshWallet(), request('/api/history')]).catch((reason) => setError(reason.message))} onError={setError} />}
     </main>
 
@@ -393,7 +385,7 @@ function PlayScreen({ t, rooms, onJoin, busy, onRefresh }) {
         </button>
       </article>)}</div>}
     <section className="howto panel"><div className="eyebrow">🎁 PLAY SMART</div><h2>Pick. Play. Win.</h2>
-      <p className="muted">Choose up to 2 cartelas. Each cartela costs 10.00 BIRR.</p>
+      <p className="muted">Choose up to 3 cartelas. Each cartela costs 10.00 BIRR.</p>
       <p className="muted">{t.rules} Prizes are paid from the room pool after server validation.</p>
     </section>
   </>;
@@ -407,7 +399,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
     <section className="section-heading"><div><div className="eyebrow">ROOM #{room.roomNumber || room.id}</div><h2>{t.cards}</h2></div><span className="status status-waiting">{room.status}</span></section>
     <div className="panel cartela-summary">
       <div><small>{t.available}</small><b>{cards.filter((card) => card.state === 'AVAILABLE').length}/100</b></div>
-      <div><small>{t.count}</small><b>{mine.length}/2</b></div>
+      <div><small>{t.count}</small><b>{mine.length}/3</b></div>
       <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
       <div><small>{t.balance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
     </div>
@@ -421,7 +413,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
       onClick={() => onToggle(card)}
     >{card.number}</button>)}</div>
     <div className="sticky-summary panel">
-      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/2</small>
+      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/3</small>
         <b>{t.total}: {money(room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString())} BIRR</b>
       </div>
       <span className="muted">Remaining · {room.selection?.remainingBalance == null ? (wallet === null ? '—' : money(wallet)) : money(room.selection.remainingBalance)} BIRR</span>
@@ -506,23 +498,9 @@ function HistoryScreen({ history, t }) {
   </>;
 }
 
-function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, referral, appInfo, onCreateRoom, onRanks, onRefresh }) {
-  const [roomSettings, setRoomSettings] = useState({ minPlayers: '', maxPlayers: '' });
+function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, appInfo, onRanks, onRefresh }) {
   const [roomMessage, setRoomMessage] = useState('');
   const info = profile?.user || user;
-  async function submitRoom(event) {
-    event.preventDefault();
-    setRoomMessage('');
-    try {
-      const created = await onCreateRoom({
-        minPlayers: Number(roomSettings.minPlayers),
-        maxPlayers: Number(roomSettings.maxPlayers),
-      });
-      setRoomMessage(`Room #${created.roomNumber} created.`);
-    } catch (error) {
-      setRoomMessage(error.message);
-    }
-  }
   async function shareInvite() {
     if (!referral?.referralUrl) return;
     try {
@@ -561,14 +539,6 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, admin, refe
       <p className="muted">Successful referrals: {referral?.successful ?? '—'}</p>
       {roomMessage && <p className="muted" role="status">{roomMessage}</p>}
     </section>
-    {admin && <section className="panel settings"><h2>Create game room</h2>
-      <form onSubmit={submitRoom}>
-        <p className="muted">Each cartela costs 10.00 BIRR.</p>
-        <label>Minimum players to start<input required type="number" min="2" max="100" value={roomSettings.minPlayers} onChange={(event) => setRoomSettings({ ...roomSettings, minPlayers: event.target.value })} /></label>
-        <label>Maximum players<input required type="number" min="2" max="100" value={roomSettings.maxPlayers} onChange={(event) => setRoomSettings({ ...roomSettings, maxPlayers: event.target.value })} /></label>
-        <button className="primary-button" disabled={busy}>{busy ? t.loading : 'Create room'}</button>
-      </form>
-    </section>}
   </>;
 }
 
