@@ -18,7 +18,7 @@ Configure the existing bot, webhook, Telegram Mini App, and TiDB environment var
 
 ## Rooms and game rules
 
-When a player opens the lobby, the server automatically creates a persistent waiting room if no joinable room is available. A database row lock prevents simultaneous app opens from creating duplicate empty rooms. New rooms use a 2-player start threshold, a 20-player capacity, and cartelas cost 10.00 BIRR.
+When the lobby opens, the server automatically creates a persistent waiting room if no joinable room is available. The room list and room creation do not require identity data; joining, wallet access, and every game action still require verified Telegram Mini App authentication. This lets the lobby display its real room card even when the URL is opened outside Telegram, without allowing unauthenticated play. A database row lock prevents simultaneous app opens from creating duplicate empty rooms. New rooms use a 2-player start threshold, a 20-player capacity, and cartelas cost 10.00 BIRR. Existing databases are migrated so system-created rooms can have a null creator.
 
 Each room has 100 generated cartelas; a player may hold up to three. Cartela purchases debit the same wallet as the bot, and returning/leaving a waiting room refunds those purchases. Cartelas cannot be changed or refunded after the game starts. Selected cartelas are green, other players' selections are red, and free cartelas are purple. The lobby checks for a joinable waiting room when opened and refreshes the listing every eight seconds.
 

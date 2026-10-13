@@ -43,12 +43,12 @@ const words = {
   },
 };
 
-async function api(path, { method = 'GET', body, initData } = {}) {
-  if (!initData) throw new Error('Open this Mini App from Telegram to authenticate.');
+async function api(path, { method = 'GET', body, initData, allowAnonymous = false } = {}) {
+  if (!initData && !allowAnonymous) throw new Error('Open this Mini App from Telegram to authenticate.');
   const response = await fetch(path, {
     method,
     headers: {
-      Authorization: `tma ${initData}`,
+      ...(initData ? { Authorization: `tma ${initData}` } : {}),
       ...(body ? { 'content-type': 'application/json' } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
@@ -87,9 +87,10 @@ function App() {
   }, [request]);
 
   const refreshRooms = useCallback(async () => {
-    const data = await request('/api/rooms');
+    const data = await api('/api/rooms', { initData, allowAnonymous: true });
     setRooms(data.rooms);
-  }, [request]);
+    return data;
+  }, [initData]);
 
   const loadRoom = useCallback(async (id) => {
     const data = await request(`/api/rooms/${encodeURIComponent(id)}`);
@@ -150,24 +151,26 @@ function App() {
   }, [view]);
 
   useEffect(() => {
-    if (!initData) {
-      if (telegramChecked) setError(telegramDiagnostic);
-      return;
-    }
     let active = true;
-    Promise.all([refreshRooms(), refreshWallet()])
-      .then(([roomData]) => {
-        if (active) setError('');
-        if (active && roomData.myRoom) {
-          loadRoom(roomData.myRoom).catch((reason) => { if (active) setError(reason.message); });
+    refreshRooms()
+      .then((roomData) => {
+        if (!active) return;
+        if (initData) {
+          setError('');
+          if (roomData.myRoom) {
+            loadRoom(roomData.myRoom).catch((reason) => { if (active) setError(reason.message); });
+          }
+        } else if (telegramChecked) {
+          setError(telegramDiagnostic);
         }
       })
       .catch((reason) => { if (active) setError(reason.message); });
+    if (initData) refreshWallet().catch((reason) => { if (active) setError(reason.message); });
     return () => { active = false; };
   }, [initData, telegramChecked, telegramDiagnostic, refreshWallet, refreshRooms, loadRoom]);
 
   useEffect(() => {
-    if (!initData || view !== 'play') return undefined;
+    if (view !== 'play') return undefined;
     const timer = window.setInterval(() => {
       refreshRooms().catch((reason) => setError(reason.message));
     }, 8000);
@@ -374,14 +377,14 @@ function PlayScreen({ t, rooms, onJoin, busy, onRefresh }) {
     {rooms.length === 0
       ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>New rooms will appear here when opened.</p><button className="outline-button" onClick={onRefresh}>{t.retry}</button></div>
       : <div className="room-list">{rooms.map((room) => <article className="room-card panel" key={room.id}>
-        <div className="room-title"><div><span className="eyebrow">ROOM</span><h3>#{room.roomNumber || room.id}</h3><small className="muted">75-Ball Classic · Max {room.maxPlayers} Players</small></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span></div>
+        <div className="room-title"><div><span className="eyebrow">ROOM #{room.roomNumber || room.id}</span><h3>75-Ball Classic</h3><small className="muted">Starts with {room.minPlayers} players · Max {room.maxPlayers}</small></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status === 'WAITING' ? 'SELECTING' : room.status}</span></div>
         <div className="room-stats">
-          <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
+          <div><small>STAKE</small><b>{money(room.stake)} BIRR</b></div>
           <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
           <div><small>PRIZE POOL</small><b className="gold">{money(room.prizePool)} BIRR</b></div>
         </div>
         <button className="primary-button" disabled={busy || room.status !== 'WAITING' || room.currentPlayers >= room.maxPlayers} onClick={() => onJoin(room)}>
-          {busy ? t.loading : t.join} <span>→</span>
+          {busy ? t.loading : 'Enter Game'} <span>▶</span>
         </button>
       </article>)}</div>}
     <section className="howto panel"><div className="eyebrow">🎁 PLAY SMART</div><h2>Pick. Play. Win.</h2>

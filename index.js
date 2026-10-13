@@ -225,7 +225,7 @@ function initializeSchema() {
           max_players INT UNSIGNED NOT NULL,
           prize_pool DECIMAL(20, 2) NOT NULL DEFAULT 0.00,
           status VARCHAR(16) NOT NULL DEFAULT 'WAITING',
-          created_by BIGINT UNSIGNED NOT NULL,
+          created_by BIGINT UNSIGNED NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           started_at TIMESTAMP NULL,
           finished_at TIMESTAMP NULL,
@@ -234,6 +234,13 @@ function initializeSchema() {
           CONSTRAINT fk_room_creator FOREIGN KEY (created_by) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      const [creatorColumn] = await pool.execute(
+        `SELECT is_nullable FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'bingo_rooms' AND column_name = 'created_by'`,
+      );
+      if (creatorColumn[0]?.is_nullable === 'NO') {
+        await pool.query('ALTER TABLE bingo_rooms MODIFY created_by BIGINT UNSIGNED NULL');
+      }
       await pool.query(`
         CREATE TABLE IF NOT EXISTS bingo_lobby_lock (
           id TINYINT UNSIGNED NOT NULL PRIMARY KEY
@@ -1412,6 +1419,20 @@ function authenticatedTelegramUser(req, res, next) {
   }
 }
 
+function optionalTelegramUser(req, res, next) {
+  const authorization = req.get('Authorization');
+  if (!authorization) {
+    next();
+    return;
+  }
+  try {
+    req.telegramUser = verifyInitData(authorization.replace(/^tma\s+/i, ''));
+    next();
+  } catch (error) {
+    res.status(error.status || 401).json({ error: error.message });
+  }
+}
+
 function adminOnly(req, res, next) {
   if (String(req.telegramUser.id) !== config.adminId) {
     return res.status(403).json({ error: 'Administrator access is required.' });
@@ -1439,7 +1460,7 @@ function generateCartela() {
   return card;
 }
 
-async function ensureOpenRoom(creatorTelegramId) {
+async function ensureOpenRoom(creatorTelegramId = null) {
   await initializeSchema();
   const connection = await pool.getConnection();
   try {
@@ -1460,7 +1481,7 @@ async function ensureOpenRoom(creatorTelegramId) {
     const [inserted] = await connection.execute(
       `INSERT INTO bingo_rooms (room_number, stake, min_players, max_players, created_by)
        VALUES ('pending', ?, ?, ?, ?)`,
-      [cartelaPrice, roomMinPlayers, roomMaxPlayers, String(creatorTelegramId)],
+      [cartelaPrice, roomMinPlayers, roomMaxPlayers, creatorTelegramId ? String(creatorTelegramId) : null],
     );
     const roomId = String(inserted.insertId);
     const slots = Array.from({ length: 100 }, (_, index) => [
@@ -1694,30 +1715,33 @@ app.get('/health', async (_req, res) => {
   }
 });
 
-app.get('/api/rooms', authenticatedTelegramUser, async (req, res, next) => {
+app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
   try {
     await initializeSchema();
-    await upsertUser(req.telegramUser);
-    await ensureOpenRoom(String(req.telegramUser.id));
+    if (req.telegramUser) await upsertUser(req.telegramUser);
+    await ensureOpenRoom(req.telegramUser ? String(req.telegramUser.id) : null);
+    const telegramId = req.telegramUser ? String(req.telegramUser.id) : null;
     const [rooms] = await pool.execute(
       `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
          (SELECT COUNT(*) FROM bingo_players p
           WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players
        FROM bingo_rooms r
        WHERE r.status = 'WAITING'
-          OR (r.status = 'PLAYING' AND EXISTS (
+          OR (? IS NOT NULL AND r.status = 'PLAYING' AND EXISTS (
             SELECT 1 FROM bingo_players mine
             WHERE mine.room_id = r.id AND mine.telegram_id = ? AND mine.left_at IS NULL
           ))
        ORDER BY r.created_at DESC`,
-      [String(req.telegramUser.id)],
+      [telegramId, telegramId],
     );
-    const [myRooms] = await pool.execute(
-      `SELECT id FROM bingo_rooms r JOIN bingo_players p ON p.room_id = r.id
-       WHERE p.telegram_id = ? AND p.left_at IS NULL AND r.status IN ('WAITING', 'PLAYING')
-       ORDER BY p.joined_at DESC LIMIT 1`,
-      [String(req.telegramUser.id)],
-    );
+    const myRooms = telegramId
+      ? (await pool.execute(
+        `SELECT id FROM bingo_rooms r JOIN bingo_players p ON p.room_id = r.id
+         WHERE p.telegram_id = ? AND p.left_at IS NULL AND r.status IN ('WAITING', 'PLAYING')
+         ORDER BY p.joined_at DESC LIMIT 1`,
+        [telegramId],
+      ))[0]
+      : [];
     res.json({
       myRoom: myRooms[0] ? String(myRooms[0].id) : null,
       rooms: rooms.map((room) => ({
