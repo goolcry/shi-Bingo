@@ -1500,9 +1500,69 @@ async function ensureOpenRoom(creatorTelegramId = null) {
 }
 
 function parseCartela(value) {
-  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-  if (!Array.isArray(parsed) || parsed.length !== 25) throw new Error('Stored cartela data is invalid.');
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      throw Object.assign(new Error('Stored cartela data is invalid.'), { code: 'INVALID_CARTELA_DATA' });
+    }
+  }
+  if (Array.isArray(parsed) && parsed.length === 5 && parsed.every((row) => Array.isArray(row) && row.length === 5)) {
+    parsed = parsed.flat();
+  }
+  if (!Array.isArray(parsed) || parsed.length !== 25) {
+    throw Object.assign(new Error('Stored cartela data is invalid.'), { code: 'INVALID_CARTELA_DATA' });
+  }
   return parsed;
+}
+
+async function repairRoomCartelas(connection, roomId) {
+  const [slots] = await connection.execute(
+    `SELECT cartela_number, numbers, owner_telegram_id
+     FROM cartela_slots WHERE room_id = ? ORDER BY cartela_number FOR UPDATE`,
+    [roomId],
+  );
+  const [reservations] = await connection.execute(
+    `SELECT cartela_number FROM cartela_reservations
+     WHERE room_id = ? AND status = 'ACTIVE' FOR UPDATE`,
+    [roomId],
+  );
+  const activeReservations = new Set(reservations.map((row) => Number(row.cartela_number)));
+  const present = new Set(slots.map((row) => Number(row.cartela_number)));
+  const missing = [];
+
+  for (const slot of slots) {
+    let valid = true;
+    try {
+      parseCartela(slot.numbers);
+    } catch (error) {
+      if (error.code !== 'INVALID_CARTELA_DATA') throw error;
+      valid = false;
+    }
+    if (valid) continue;
+    const number = Number(slot.cartela_number);
+    if (slot.owner_telegram_id || activeReservations.has(number)) {
+      throw Object.assign(
+        new Error(`Cartela #${number} has invalid stored numbers and is owned or reserved; its layout was preserved.`),
+        { status: 503, code: 'RESERVED_CARTELA_DATA_INVALID' },
+      );
+    }
+    await connection.execute(
+      'UPDATE cartela_slots SET numbers = ? WHERE room_id = ? AND cartela_number = ?',
+      [JSON.stringify(generateCartela()), roomId, number],
+    );
+  }
+
+  for (let number = 1; number <= 100; number += 1) {
+    if (!present.has(number)) missing.push([roomId, number, JSON.stringify(generateCartela())]);
+  }
+  if (missing.length) {
+    await connection.query(
+      'INSERT INTO cartela_slots (room_id, cartela_number, numbers) VALUES ?',
+      [missing],
+    );
+  }
 }
 
 function winningPattern(numbers, calledNumbers) {
@@ -1770,6 +1830,7 @@ app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next
       const room = rooms[0];
       if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
       if (room.status !== 'WAITING') throw Object.assign(new Error('This room is no longer accepting players.'), { status: 409 });
+      await repairRoomCartelas(connection, room.id);
       const [existing] = await connection.execute(
         'SELECT left_at FROM bingo_players WHERE room_id = ? AND telegram_id = ? FOR UPDATE',
         [room.id, String(req.telegramUser.id)],
