@@ -2787,11 +2787,15 @@ app.use((error, _req, res, _next) => {
     route: _req.path,
     code: error.code || 'REQUEST_FAILED',
     status: Number.isInteger(error.status) ? error.status : 500,
+    message: error.message,
+    ...(error.errno ? { errno: error.errno } : {}),
+    ...(error.sqlState ? { sqlState: error.sqlState } : {}),
   }));
   if (res.headersSent) return;
   const status = Number.isInteger(error.status) ? error.status : 500;
   res.status(status).json({
     error: status < 500 ? error.message : 'The request could not be completed. Please retry.',
+    requestId: _req.requestId,
     ...(error.code ? { code: error.code } : {}),
   });
 });

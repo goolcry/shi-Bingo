@@ -56,9 +56,12 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(data.error || `Request failed (${response.status}).`);
+    const requestId = data.requestId || response.headers.get('x-request-id');
+    const message = data.error || `Request failed (${response.status}).`;
+    const error = new Error(requestId ? `${message} (Reference: ${requestId})` : message);
     error.status = response.status;
     error.code = data.code;
+    error.requestId = requestId;
     throw error;
   }
   return data;
