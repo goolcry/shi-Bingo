@@ -5,7 +5,8 @@
   "description": "Telegram webhook bot and Mini App foundation for SHISHO BINGO",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "build": "esbuild web/app.jsx --bundle --minify --outfile=public/mini-app.js"
   },
   "engines": {
     "node": ">=20"
@@ -13,6 +14,11 @@
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
-    "mysql2": "^3.14.1"
+    "mysql2": "^3.14.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

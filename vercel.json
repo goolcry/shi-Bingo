@@ -1,0 +1,8 @@
+{
+  "buildCommand": "npm run build",
+  "functions": {
+    "index.js": {
+      "includeFiles": "public/mini-app.js"
+    }
+  }
+}
