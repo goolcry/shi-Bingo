@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const money = (value) => {
@@ -55,7 +55,12 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status}).`);
+    error.status = response.status;
+    error.code = data.code;
+    throw error;
+  }
   return data;
 }
 
@@ -70,6 +75,7 @@ function App() {
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
+  const roomStateRevision = useRef(0);
   const [game, setGame] = useState(null);
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
@@ -119,6 +125,7 @@ function App() {
       setWalletError('');
     }
     setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
+    return data;
   }, [request]);
 
   useEffect(() => {
@@ -163,7 +170,7 @@ function App() {
     const telegram = telegramWebApp();
     if (telegram?.BackButton) {
       telegram.BackButton.onClick(() => {
-        if (view === 'game' || view === 'cartelas') {
+        if (view === 'game' || view === 'cartelas' || view === 'waiting') {
           setView('play');
           setRoom(null);
           setGame(null);
@@ -218,12 +225,13 @@ function App() {
   }, [initData, refreshWallet]);
 
   useEffect(() => {
-    if (!room?.id || !['cartelas', 'game'].includes(view)) return undefined;
+    if (!room?.id || !['cartelas', 'waiting', 'game'].includes(view)) return undefined;
     let active = true;
     const update = async () => {
+      const revision = roomStateRevision.current;
       try {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}`);
-        if (!active) return;
+        if (!active || revision !== roomStateRevision.current) return;
         setRoom(data.room);
         setGame(data.game || null);
         setWallet(data.wallet?.availableBalance ?? wallet);
@@ -234,7 +242,7 @@ function App() {
       }
     };
     update();
-    const timer = window.setInterval(update, 4000);
+    const timer = window.setInterval(update, 3000);
     return () => { active = false; window.clearInterval(timer); };
   }, [room?.id, view, request]);
 
@@ -273,6 +281,14 @@ function App() {
     if (next === 'play') refreshRooms().catch((reason) => setError(reason.message));
   };
 
+  function returnToLobby() {
+    roomStateRevision.current += 1;
+    setRoom(null);
+    setGame(null);
+    setView('play');
+    refreshRooms().catch((reason) => setError(reason.message));
+  }
+
   function retryTelegramAuthentication() {
     const telegram = telegramWebApp();
     telegram?.ready();
@@ -299,6 +315,7 @@ function App() {
     setBusy(true);
     try {
       const data = await request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} });
+      roomStateRevision.current += 1;
       setRoom(data.room);
       setGame(data.game || null);
       setWallet(data.wallet.availableBalance);
@@ -331,9 +348,14 @@ function App() {
         method: 'POST',
         body: {},
       });
+      roomStateRevision.current += 1;
       setRoom(data.room);
       setWallet(data.wallet.availableBalance);
       setWalletError('');
+      if (data.room.status === 'PLAYING') {
+        setGame(data.game || null);
+        setView('game');
+      }
       setError('');
     } catch (reason) {
       let message = reason.message;
@@ -350,6 +372,7 @@ function App() {
         message += ` Wallet refresh failed: ${refreshError.message}`;
       }
       setError(message);
+      throw reason;
     } finally {
       setBusy(false);
     }
@@ -360,12 +383,37 @@ function App() {
     setBusy(true);
     try {
       await request(`/api/rooms/${encodeURIComponent(room.id)}/leave`, { method: 'POST', body: {} });
+      roomStateRevision.current += 1;
       setRoom(null);
       setGame(null);
       setView('play');
       await Promise.all([refreshWallet(), refreshRooms()]);
     } catch (reason) {
       setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmRoomEntry() {
+    if (!room || busy) return;
+    setBusy(true);
+    try {
+      const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/confirm-entry`, {
+        method: 'POST',
+        body: {},
+      });
+      roomStateRevision.current += 1;
+      setRoom(data.room);
+      setGame(data.game || null);
+      setWallet(data.wallet.availableBalance);
+      setWalletError('');
+      setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'waiting');
+      setError('');
+    } catch (reason) {
+      setError(reason.message);
+      if (['ROOM_CLOSED', 'ROOM_NOT_FOUND', 'NOT_A_ROOM_PLAYER'].includes(reason.code)) returnToLobby();
+      else if (room?.id) await loadRoom(room.id).catch((refreshError) => setError(`${reason.message} Room refresh failed: ${refreshError.message}`));
     } finally {
       setBusy(false);
     }
@@ -396,7 +444,7 @@ function App() {
         <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</small></span>
       </div>
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
-        <span aria-hidden="true">💰</span> {walletLoading ? '…' : wallet === null ? '—' : money(wallet)} <small>ETB</small>
+        <span aria-hidden="true">💰</span> {walletLoading ? '…' : wallet === null ? '—' : money(wallet)} <small>BIRR</small>
       </button>
     </header>
 
@@ -414,7 +462,8 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={leaveRoom} />}
+      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onRefresh={() => loadRoom(room.id)} onBack={returnToLobby} onLeave={leaveRoom} onConfirm={confirmRoomEntry} onWallet={() => go('wallet')} />}
+      {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
         setBusy(true);
         try { await request(`/api/rooms/${room.id}/bingo`, { method: 'POST', body: { cartelaNumber: number } }); await loadRoom(room.id); }
@@ -428,7 +477,7 @@ function App() {
       {view === 'wallet' && <WalletScreen wallet={wallet} t={t} onRefresh={() => Promise.all([refreshWallet(), request('/api/history')]).catch((reason) => setError(reason.message))} onError={setError} />}
     </main>
 
-    {!['cartelas', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
+    {!['cartelas', 'waiting', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
       {[
         ['play', '🎮', t.play], ['ranks', '🏆', t.ranks], ['history', '📜', t.history], ['profile', '👤', t.profile],
       ].map(([id, icon, label]) => <button key={id} className={view === id ? 'active' : ''} onClick={() => go(id)}>
@@ -483,33 +532,150 @@ function PlayScreen({ t, rooms, roomsLoading, onJoin, busy, onRefresh }) {
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
+function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onLeave, onConfirm, onWallet }) {
   const cards = room.cartelas || [];
   const mine = cards.filter((card) => card.state === 'MINE');
+  const [previewNumber, setPreviewNumber] = useState(null);
+  const [confirmingDeselect, setConfirmingDeselect] = useState(false);
+  const [notice, setNotice] = useState('');
+  const previewCard = cards.find((card) => card.number === previewNumber) || null;
+  const waiting = room.status === 'WAITING';
+  const remainingBalance = room.selection?.remainingBalance ?? wallet;
+  const totalCost = room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString();
+
+  function openPreview(card) {
+    if (card.state === 'TAKEN') {
+      setNotice('This cartela has already been selected by another player.');
+      return;
+    }
+    setNotice('');
+    setConfirmingDeselect(false);
+    setPreviewNumber(card.number);
+  }
+
+  async function submitPreviewAction() {
+    if (!previewCard || !waiting) return;
+    setNotice('');
+    try {
+      await onToggle(previewCard);
+      setConfirmingDeselect(false);
+      if (previewCard.state === 'AVAILABLE') {
+        setNotice(`Cartela #${previewCard.number} selected for ${money(room.stake)} BIRR.`);
+      } else {
+        setNotice(`Cartela #${previewCard.number} deselected. ${money(room.stake)} BIRR refunded.`);
+      }
+      setPreviewNumber(null);
+    } catch {
+      setNotice('');
+    }
+  }
+
   return <>
-    <button className="text-button" onClick={onBack}>← {t.back}</button>
-    <section className="section-heading"><div><div className="eyebrow">ROOM #{room.roomNumber || room.id}</div><h2>{t.cards}</h2></div><span className="status status-waiting">{room.status}</span></section>
-    <div className="panel cartela-summary">
-      <div><small>{t.available}</small><b>{cards.filter((card) => card.state === 'AVAILABLE').length}/100</b></div>
-      <div><small>{t.count}</small><b>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</b></div>
-      <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
-      <div><small>{t.balance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
-    </div>
-    <p className="muted">{t.selectHelp}</p>
-    <div className="legend"><span><i className="available-dot" />{t.available}</span><span><i className="mine-dot" />{t.selected}</span><span><i className="taken-dot" />{t.taken}</span></div>
-    <div className="cartela-grid">{cards.map((card) => <button
-      key={card.number}
-      className={`cartela cartela-${String(card.state).toLowerCase()} ${busy ? 'processing' : ''}`}
-      disabled={busy || card.state === 'TAKEN'}
-      aria-label={`Cartela ${card.number}: ${card.state}`}
-      onClick={() => onToggle(card)}
-    >{card.number}</button>)}</div>
-    <div className="sticky-summary panel">
-      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/{MAX_CARTELAS_PER_PLAYER}</small>
-        <b>{t.total}: {money(room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString())} BIRR</b>
+    <button className="text-button" onClick={onBack}>← Back to rooms</button>
+    <section className="cartela-page-heading">
+      <div className="eyebrow">👑 SELECT CARTELAS</div>
+      <h1>Room #{room.roomNumber || room.id}</h1>
+      <span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span>
+    </section>
+    <section className="room-info-card panel">
+      <div className="room-info-heading"><div><small>ROOM</small><b>#{room.roomNumber || room.id}</b></div><span className={`status status-${String(room.status).toLowerCase()}`}>{room.status}</span></div>
+      <div className="room-info-grid">
+        <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
+        <div><small>PRIZE POOL</small><b>{money(room.prizePool)} BIRR</b></div>
+        <div><small>CARTELA PRICE</small><b>{money(room.stake)} BIRR each</b></div>
       </div>
-      <span className="muted">Remaining · {room.selection?.remainingBalance == null ? (wallet === null ? '—' : money(wallet)) : money(room.selection.remainingBalance)} BIRR</span>
+    </section>
+    <section className="selection-overview panel">
+      <div><small>AVAILABLE BALANCE</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
+      <div><small>SELECTED CARTELAS</small><b>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</b></div>
+      <div><small>TOTAL COST</small><b>{money(totalCost)} BIRR</b></div>
+      <div><small>REMAINING BALANCE</small><b>{remainingBalance === null ? t.unavailable : `${money(remainingBalance)} BIRR`}</b></div>
+    </section>
+    <div className="cartela-section-title">
+      <div><h2>CHOOSE YOUR CARTELAS</h2><p>{cards.filter((card) => card.state === 'AVAILABLE').length} available · {cards.length} total</p></div>
+      <button className="outline-button" disabled={busy} onClick={onRefresh}>↻ Refresh</button>
     </div>
+    <div className="legend"><span><i className="available-dot" />Available</span><span><i className="mine-dot" />Yours ✓</span><span><i className="taken-dot" />Reserved 🔒</span></div>
+    {cards.length !== 100
+      ? <div className="empty panel" role="alert"><strong>Could not load all 100 cartelas.</strong><p>The room data contains {cards.length} cartelas. Refresh to try again.</p><button className="outline-button" onClick={onRefresh}>Retry</button></div>
+      : <div className="cartela-grid">{cards.map((card) => <button
+        key={card.number}
+        className={`cartela cartela-${String(card.state).toLowerCase()} ${busy ? 'processing' : ''}`}
+        disabled={busy}
+        aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected by you' : card.state === 'TAKEN' ? 'reserved by another player' : 'available'}`}
+        onClick={() => openPreview(card)}
+      >
+        {card.state === 'MINE' ? <><span>{card.number}</span><b aria-hidden="true">✓</b></> : card.state === 'TAKEN' ? <><span>{card.number}</span><b aria-hidden="true">🔒</b></> : card.number}
+      </button>)}</div>}
+    {notice && <p className="cartela-notice" role="status">{notice}</p>}
+    {!waiting && <p className="room-closed-note" role="status">Cartela selection is closed because this room is {room.status.toLowerCase()}.</p>}
+    <section className="selection-footer panel">
+      <div className="selection-footer-details">
+        <strong>{mine.length}/{MAX_CARTELAS_PER_PLAYER} CARTELAS</strong>
+        <span>{mine.length ? mine.map((card) => `#${card.number}`).join(', ') : 'Select at least one cartela'}</span>
+        <b>{money(totalCost)} BIRR <small>total</small></b>
+      </div>
+      <button className="primary-button" disabled={busy || !mine.length || !waiting || cards.length !== 100 || wallet === null} onClick={onConfirm}>
+        {busy ? t.loading : 'CONFIRM & ENTER ROOM'}
+      </button>
+      <div className="selection-footer-actions"><span>Balance · {remainingBalance === null ? '—' : `${money(remainingBalance)} BIRR`}</span><button className="text-button" onClick={onLeave}>Leave room &amp; refund</button></div>
+      {wallet === null && <button className="outline-button" onClick={onWallet}>Wallet unavailable · Open wallet</button>}
+    </section>
+    {previewCard && <div className="modal-backdrop" role="presentation" onClick={() => { setPreviewNumber(null); setConfirmingDeselect(false); }}>
+      <section className="cartela-preview panel" role="dialog" aria-modal="true" aria-labelledby="cartela-preview-title" onClick={(event) => event.stopPropagation()}>
+        <button className="preview-close" aria-label="Close preview" onClick={() => { setPreviewNumber(null); setConfirmingDeselect(false); }}>×</button>
+        <div className="eyebrow">ROOM #{room.roomNumber || room.id}</div>
+        <h2 id="cartela-preview-title">CARTELA #{previewCard.number}</h2>
+        <div className={`preview-state preview-${previewCard.state.toLowerCase()}`}>
+          {previewCard.state === 'MINE' ? '✓ SELECTED BY YOU' : 'AVAILABLE TO SELECT'}
+        </div>
+        <div className="preview-board">
+          {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="preview-column" key={letter}>
+            <b>{letter}</b>
+            {[0, 1, 2, 3, 4].map((row) => {
+              const value = previewCard.numbers?.[row * 5 + column];
+              return <span className={value === 'FREE' ? 'preview-free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
+            })}
+          </div>)}
+        </div>
+        {confirmingDeselect
+          ? <div className="deselect-confirm" role="group" aria-label={`Confirm deselect cartela ${previewCard.number}`}>
+            <p>Deselect Cartela #{previewCard.number}? {money(room.stake)} BIRR will be refunded to your wallet.</p>
+            <div><button className="outline-button" disabled={busy} onClick={() => setConfirmingDeselect(false)}>Keep Cartela</button><button className="danger-button" disabled={busy} onClick={submitPreviewAction}>{busy ? t.loading : 'Deselect & Refund'}</button></div>
+          </div>
+          : <div className="preview-actions">
+            <p>{previewCard.state === 'MINE' ? 'Selected · refundable while the room is waiting.' : `Cost: ${money(room.stake)} BIRR`}</p>
+            {previewCard.state === 'MINE'
+              ? <button className="danger-button" disabled={busy || !waiting} onClick={() => setConfirmingDeselect(true)}>DESELECT CARTELA</button>
+              : <button className="primary-button" disabled={busy || !waiting || (mine.length >= MAX_CARTELAS_PER_PLAYER && previewCard.state !== 'MINE')} onClick={submitPreviewAction}>
+                {busy ? t.loading : mine.length >= MAX_CARTELAS_PER_PLAYER ? 'MAXIMUM 2 CARTELAS' : 'SELECT CARTELA'}
+              </button>}
+            {!waiting && <p className="room-closed-note">This room no longer accepts cartela changes.</p>}
+          </div>}
+      </section>
+    </div>}
+  </>;
+}
+
+function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh }) {
+  const selected = room.cartelas.filter((card) => card.state === 'MINE');
+  return <>
+    <button className="text-button" onClick={onBack}>← Back to rooms</button>
+    <section className="waiting-room panel">
+      <div className="waiting-crown">👑</div>
+      <div className="eyebrow">ROOM #{room.roomNumber || room.id}</div>
+      <h1>You're in the room</h1>
+      <span className="status status-waiting">{room.status}</span>
+      <p>Waiting for players to choose their cartelas. The game starts when {room.minPlayers} players have selected a cartela.</p>
+      <div className="room-info-grid">
+        <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
+        <div><small>YOUR CARTELAS</small><b>{selected.map((card) => `#${card.number}`).join(', ') || '—'}</b></div>
+        <div><small>PRIZE POOL</small><b>{money(room.prizePool)} BIRR</b></div>
+      </div>
+      <button className="primary-button" disabled={busy} onClick={onRefresh}>↻ Refresh room</button>
+      <button className="outline-button" disabled={busy} onClick={onManage}>Manage cartelas</button>
+      <button className="danger-button" disabled={busy} onClick={onLeave}>Leave room &amp; refund</button>
+    </section>
   </>;
 }
 
@@ -789,6 +955,67 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 @media(min-width:600px){.app-shell{max-width:430px}.content{padding:10px 6px 20px}.hero-crown{height:32px}.play-screen .hero{min-height:130px;padding:11px 8px 10px}.play-screen .features{margin-top:9px}.play-screen .room-list{grid-template-columns:minmax(0,1fr)}.bottom-nav{width:min(100%,430px)}}
 @keyframes crown{50%{transform:translateY(-4px) rotate(3deg);text-shadow:0 0 34px #ffc400cc}}@keyframes pulse{50%{opacity:.55}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}}
 @media(min-width:600px){.content{padding:22px 24px 36px}.cartela-grid{grid-template-columns:repeat(10,minmax(0,1fr))}.cartela{font-size:15px}.hero{min-height:230px;padding:27px}.features{margin-top:32px}.room-list{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom-nav{border-radius:18px 18px 0 0}}
+.cartela-page-heading{display:grid;justify-items:center;gap:4px;margin:8px 0 12px;text-align:center}
+.cartela-page-heading h1{margin:0;font-size:19px}
+.room-info-card,.selection-overview{margin:10px 0;padding:12px;border-radius:15px}
+.room-info-heading{display:flex;align-items:center;justify-content:space-between;padding-bottom:9px;border-bottom:1px solid #342542}
+.room-info-heading>div{display:grid;gap:2px}.room-info-heading small,.room-info-grid small,.selection-overview small{color:var(--muted);font-size:9px;letter-spacing:.08em}
+.room-info-heading b{font-size:14px}
+.room-info-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px}
+.room-info-grid>div{display:grid;gap:3px;min-width:0}
+.room-info-grid b{font-size:11px;overflow-wrap:anywhere}
+.selection-overview{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.selection-overview>div{display:grid;gap:3px;min-width:0}
+.selection-overview b{font-size:12px;overflow-wrap:anywhere}
+.cartela-section-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px}
+.cartela-section-title h2{margin:0;color:var(--gold);font-size:11px;letter-spacing:.09em}
+.cartela-section-title p{margin:3px 0 0;color:var(--muted);font-size:10px}
+.cartela-section-title .outline-button{flex:none;padding:7px 9px;font-size:10px}
+.legend{flex-wrap:wrap;gap:10px;margin:9px 0;font-size:9px}
+.cartela-grid{grid-template-columns:repeat(5,minmax(0,1fr));gap:7px;padding-bottom:12px}
+.cartela{position:relative;min-width:0;min-height:48px;aspect-ratio:1.15;border-color:#49325d;background:#211330;transition:transform .12s,border-color .12s,background .12s}
+.cartela:active{transform:scale(.95)}
+.cartela-mine{background:#16a34a;color:#fff;border-color:#4ade80;box-shadow:0 0 10px #16a34a55}
+.cartela-mine b,.cartela-taken b{position:absolute;top:2px;right:3px;font-size:9px}
+.cartela-taken{background:#b91c1c;color:#fff;border-color:#ef4444;opacity:1}
+.cartela-taken b{font-size:8px}
+.cartela.processing{animation:pulse .8s infinite}
+.cartela-notice,.room-closed-note{margin:7px 0;padding:9px 10px;border:1px solid #493263;border-radius:10px;background:#170d21;color:#e4d9ed;font-size:11px}
+.room-closed-note{border-color:#725621;color:#ffe3a1}
+.selection-footer{position:sticky;bottom:calc(8px + env(safe-area-inset-bottom));z-index:4;display:grid;gap:8px;margin:10px 0 14px;padding:12px;border-color:#76551b;border-radius:15px;background:#130b1dee;box-shadow:0 6px 24px #0009;backdrop-filter:blur(10px)}
+.selection-footer-details{display:grid;grid-template-columns:1fr auto;gap:3px 8px;align-items:center}
+.selection-footer-details strong{font-size:11px;color:var(--gold)}
+.selection-footer-details span{min-width:0;overflow:hidden;color:var(--muted);font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.selection-footer-details>b{grid-column:2;grid-row:1 / span 2;text-align:right;font-size:13px}
+.selection-footer-details small{color:var(--muted);font-size:9px;font-weight:500}
+.selection-footer>.primary-button{justify-content:center;min-height:42px;padding:10px 12px;font-size:12px}
+.selection-footer-actions{display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--muted);font-size:9px}
+.selection-footer-actions .text-button{max-width:60%;padding:4px;color:#f2a2a2;font-size:9px;text-align:right}
+.modal-backdrop{position:fixed;inset:0;z-index:30;display:flex;align-items:flex-end;justify-content:center;padding:12px 10px calc(12px + env(safe-area-inset-bottom));background:#05020bd9}
+.cartela-preview{position:relative;width:min(100%,420px);max-height:90dvh;overflow:auto;padding:18px 15px 15px;border-color:#76551b;border-radius:20px;background:#130b1d;box-shadow:0 16px 50px #000b}
+.preview-close{position:absolute;top:10px;right:11px;width:32px;height:32px;border:1px solid #493263;border-radius:50%;background:#1b1028;color:#e8dff0;font-size:22px;line-height:1}
+.cartela-preview h2{margin:4px 34px 8px 0;font-size:17px}
+.preview-state{margin:8px 0;padding:8px;border:1px solid #493263;border-radius:9px;color:#d4c7df;font-size:10px;font-weight:800;text-align:center}
+.preview-mine{border-color:#16a34a;background:#0d321c;color:#86efac}
+.preview-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px}
+.preview-column{display:grid;grid-template-rows:30px repeat(5,minmax(37px,1fr));gap:4px}
+.preview-column>*{display:grid;place-items:center;min-width:0;border:1px solid #382747;border-radius:7px;background:#0e0815;color:#f8f5fb;font-size:12px;font-weight:700}
+.preview-column>b{border-color:#76551b;background:#261a0d;color:var(--gold);font-size:15px}
+.preview-column .preview-free{background:#5b3b0b;color:#ffe36a;font-size:8px}
+.preview-actions{display:grid;gap:7px;margin-top:12px}
+.preview-actions>p,.deselect-confirm>p{margin:0;color:var(--muted);font-size:11px;text-align:center}
+.preview-actions .primary-button,.preview-actions .danger-button{justify-content:center;min-height:42px}
+.deselect-confirm{display:grid;gap:9px;margin-top:12px;padding:10px;border:1px solid #76551b;border-radius:11px;background:#1a1120}
+.deselect-confirm>div{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.deselect-confirm .outline-button,.deselect-confirm .danger-button{width:100%;margin:0;padding:9px 6px;font-size:10px}
+.waiting-room{display:grid;justify-items:center;gap:10px;margin-top:12px;padding:20px 14px;border-radius:18px;text-align:center}
+.waiting-crown{font-size:38px}
+.waiting-room h1{margin:0;font-size:21px}
+.waiting-room>p{margin:0;color:var(--muted);font-size:12px}
+.waiting-room .room-info-grid{width:100%;text-align:left}
+.waiting-room>.primary-button,.waiting-room>.outline-button,.waiting-room>.danger-button{justify-content:center;width:100%;margin:0;padding:10px;font-size:11px}
+@media(max-width:370px){.cartela-grid{gap:5px}.cartela{min-height:42px;font-size:12px}.cartela-section-title h2{font-size:10px}.selection-overview{gap:8px;padding:10px}.selection-overview b{font-size:10px}}
+@media(min-width:600px){.cartela-grid{grid-template-columns:repeat(5,minmax(0,1fr))}.modal-backdrop{align-items:center}.cartela-preview{max-height:85vh}.cartela{min-height:52px}}
 `;
 
 createRoot(document.getElementById('root')).render(<App />);

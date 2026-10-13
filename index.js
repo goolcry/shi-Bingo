@@ -1665,7 +1665,7 @@ async function roomSnapshot(roomId, telegramId) {
   const calledNumbers = calls.map((call) => Number(call.number));
   const cartelas = cards.map((card) => {
     const mine = String(card.owner_telegram_id || '') === String(telegramId);
-    const numbers = mine ? parseCartela(card.numbers) : null;
+    const numbers = parseCartela(card.numbers);
     const hits = numbers?.filter((value) => value === 'FREE' || calledNumbers.includes(Number(value))).length || 0;
     return {
       number: Number(card.cartela_number),
@@ -1800,6 +1800,47 @@ app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next
     res.json({ joined: true, ...state });
   } catch (error) {
     next(error);
+  }
+});
+
+app.post('/api/rooms/:id/confirm-entry', authenticatedTelegramUser, async (req, res, next) => {
+  const connection = await pool.getConnection();
+  try {
+    await initializeSchema();
+    await connection.beginTransaction();
+    const [[room]] = await connection.execute(
+      'SELECT id, status FROM bingo_rooms WHERE id = ? FOR UPDATE',
+      [req.params.id],
+    );
+    if (!room) throw Object.assign(new Error('Room not found.'), { status: 404, code: 'ROOM_NOT_FOUND' });
+    if (!['WAITING', 'PLAYING'].includes(room.status)) {
+      throw Object.assign(new Error('This room is closed and cannot be entered.'), { status: 409, code: 'ROOM_CLOSED' });
+    }
+    const [players] = await connection.execute(
+      `SELECT 1 FROM bingo_players
+       WHERE room_id = ? AND telegram_id = ? AND left_at IS NULL FOR UPDATE`,
+      [room.id, String(req.telegramUser.id)],
+    );
+    if (!players.length) {
+      throw Object.assign(new Error('Join this room before confirming entry.'), { status: 403, code: 'NOT_A_ROOM_PLAYER' });
+    }
+    const [[selection]] = await connection.execute(
+      `SELECT COUNT(*) AS count FROM cartela_reservations
+       WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
+      [room.id, String(req.telegramUser.id)],
+    );
+    if (Number(selection.count) < 1) {
+      throw Object.assign(new Error('Select at least one cartela before entering the room.'), { status: 409, code: 'CARTELA_REQUIRED' });
+    }
+    await connection.commit();
+    const state = await roomSnapshot(room.id, req.telegramUser.id);
+    state.wallet = { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) };
+    res.json({ confirmed: true, ...state });
+  } catch (error) {
+    try { await connection.rollback(); } catch { /* The transaction may already be closed. */ }
+    next(error);
+  } finally {
+    connection.release();
   }
 });
 
@@ -2751,6 +2792,7 @@ app.use((error, _req, res, _next) => {
   const status = Number.isInteger(error.status) ? error.status : 500;
   res.status(status).json({
     error: status < 500 ? error.message : 'The request could not be completed. Please retry.',
+    ...(error.code ? { code: error.code } : {}),
   });
 });
 
