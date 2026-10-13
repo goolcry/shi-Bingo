@@ -1501,17 +1501,25 @@ async function ensureOpenRoom(creatorTelegramId = null) {
 
 function parseCartela(value) {
   let parsed = value;
-  if (typeof parsed === 'string') {
+  for (let depth = 0; typeof parsed === 'string' && depth < 3; depth += 1) {
     try {
       parsed = JSON.parse(parsed);
     } catch {
       throw Object.assign(new Error('Stored cartela data is invalid.'), { code: 'INVALID_CARTELA_DATA' });
     }
   }
+  if (parsed && !Array.isArray(parsed) && typeof parsed === 'object') {
+    if (Array.isArray(parsed.numbers)) parsed = parsed.numbers;
+    else if (['B', 'I', 'N', 'G', 'O'].every((letter) => Array.isArray(parsed[letter]) && parsed[letter].length === 5)) {
+      parsed = Array.from({ length: 5 }, (_, row) => ['B', 'I', 'N', 'G', 'O'].map((letter) => parsed[letter][row])).flat();
+    }
+  }
   if (Array.isArray(parsed) && parsed.length === 5 && parsed.every((row) => Array.isArray(row) && row.length === 5)) {
     parsed = parsed.flat();
   }
-  if (!Array.isArray(parsed) || parsed.length !== 25) {
+  if (!Array.isArray(parsed) || parsed.length !== 25
+    || parsed[12] !== 'FREE'
+    || parsed.some((value, index) => index !== 12 && (!Number.isInteger(Number(value)) || Number(value) < 1 || Number(value) > 75))) {
     throw Object.assign(new Error('Stored cartela data is invalid.'), { code: 'INVALID_CARTELA_DATA' });
   }
   return parsed;
@@ -1695,11 +1703,43 @@ async function advanceRoomGame(roomId) {
 async function roomSnapshot(roomId, telegramId) {
   const [[room]] = await pool.execute('SELECT * FROM bingo_rooms WHERE id = ?', [roomId]);
   if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
-  const [cards] = await pool.execute(
+  let [cards] = await pool.execute(
     `SELECT cartela_number, numbers, owner_telegram_id FROM cartela_slots
      WHERE room_id = ? ORDER BY cartela_number`,
     [roomId],
   );
+  let hasInvalidCartelas = cards.length !== 100;
+  for (const card of cards) {
+    try {
+      parseCartela(card.numbers);
+    } catch (error) {
+      if (error.code !== 'INVALID_CARTELA_DATA') throw error;
+      hasInvalidCartelas = true;
+      break;
+    }
+  }
+  if (hasInvalidCartelas && room.status === 'WAITING') {
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [[lockedRoom]] = await connection.execute(
+        'SELECT status FROM bingo_rooms WHERE id = ? FOR UPDATE',
+        [roomId],
+      );
+      if (lockedRoom?.status === 'WAITING') await repairRoomCartelas(connection, roomId);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback().catch(() => {});
+      throw error;
+    } finally {
+      connection.release();
+    }
+    [cards] = await pool.execute(
+      `SELECT cartela_number, numbers, owner_telegram_id FROM cartela_slots
+       WHERE room_id = ? ORDER BY cartela_number`,
+      [roomId],
+    );
+  }
   const [calls] = await pool.execute(
     'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
     [roomId],
