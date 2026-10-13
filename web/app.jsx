@@ -15,6 +15,7 @@ const multiplyMoney = (value, multiplier) => {
   return (BigInt(whole) * 100n + BigInt((decimal + '00').slice(0, 2))) * BigInt(multiplier);
 };
 const telegramWebApp = () => window.Telegram?.WebApp;
+const MAX_CARTELAS_PER_PLAYER = 2;
 
 const words = {
   en: {
@@ -63,6 +64,8 @@ function App() {
   const t = words[lang];
   const [user, setUser] = useState(null);
   const [wallet, setWallet] = useState(null);
+  const [walletLoading, setWalletLoading] = useState(true);
+  const [walletError, setWalletError] = useState('');
   const [rooms, setRooms] = useState([]);
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [view, setView] = useState('play');
@@ -81,10 +84,19 @@ function App() {
 
   const request = useCallback((path, options) => api(path, { ...options, initData }), [initData]);
   const refreshWallet = useCallback(async () => {
-    const data = await request('/api/me');
-    setUser(data.user);
-    setWallet(data.wallet.balance);
-    setLang(data.user.language === 'am' ? 'am' : 'en');
+    setWalletLoading(true);
+    try {
+      const data = await request('/api/me');
+      setUser(data.user);
+      setWallet(data.wallet.balance);
+      setLang(data.user.language === 'am' ? 'am' : 'en');
+      setWalletError('');
+    } catch (reason) {
+      setWalletError(reason.message);
+      throw reason;
+    } finally {
+      setWalletLoading(false);
+    }
   }, [request]);
 
   const refreshRooms = useCallback(async () => {
@@ -102,7 +114,11 @@ function App() {
     const data = await request(`/api/rooms/${encodeURIComponent(id)}`);
     setRoom(data.room);
     setGame(data.game || null);
-    setView(data.room.status === 'PLAYING' ? 'game' : 'cartelas');
+    if (data.wallet?.availableBalance !== undefined) {
+      setWallet(data.wallet.availableBalance);
+      setWalletError('');
+    }
+    setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
   }, [request]);
 
   useEffect(() => {
@@ -124,6 +140,7 @@ function App() {
       if (attempts >= 20) {
         if (active) {
           setTelegramChecked(true);
+          setWalletLoading(false);
           setTelegramDiagnostic(telegram
             ? `Telegram SDK detected (${telegram.platform || 'platform unknown'}, version ${telegram.version || 'unknown'}), but no launch data was provided. Close this window and reopen the Mini App from the bot menu.`
             : 'Telegram WebApp SDK was not detected. Open this Mini App from the bot menu inside Telegram.');
@@ -182,6 +199,23 @@ function App() {
     }, 8000);
     return () => window.clearInterval(timer);
   }, [initData, view, refreshRooms]);
+
+  useEffect(() => {
+    if (!initData) return undefined;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refreshWallet().catch((reason) => setError(reason.message));
+      }
+    };
+    const timer = window.setInterval(refreshIfVisible, 10000);
+    window.addEventListener('focus', refreshIfVisible);
+    document.addEventListener('visibilitychange', refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshIfVisible);
+      document.removeEventListener('visibilitychange', refreshIfVisible);
+    };
+  }, [initData, refreshWallet]);
 
   useEffect(() => {
     if (!room?.id || !['cartelas', 'game'].includes(view)) return undefined;
@@ -258,10 +292,18 @@ function App() {
   }
 
   async function enterRoom(item) {
+    if (!initData) {
+      setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
+      return;
+    }
     setBusy(true);
     try {
-      await request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} });
-      await loadRoom(item.id);
+      const data = await request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} });
+      setRoom(data.room);
+      setGame(data.game || null);
+      setWallet(data.wallet.availableBalance);
+      setWalletError('');
+      setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
       setError('');
     } catch (reason) {
       try {
@@ -277,6 +319,11 @@ function App() {
 
   async function toggleCard(card) {
     if (!room || busy || card.state === 'TAKEN') return;
+    const currentSelectionCount = room.cartelas.filter((item) => item.state === 'MINE').length;
+    if (card.state === 'AVAILABLE' && currentSelectionCount >= MAX_CARTELAS_PER_PLAYER) {
+      setError(`You can select up to ${MAX_CARTELAS_PER_PLAYER} cartelas in one room.`);
+      return;
+    }
     setBusy(true);
     try {
       const action = card.state === 'MINE' ? 'deselect' : 'select';
@@ -286,11 +333,23 @@ function App() {
       });
       setRoom(data.room);
       setWallet(data.wallet.availableBalance);
+      setWalletError('');
       setError('');
     } catch (reason) {
-      setError(reason.message);
-      if (room?.id) await loadRoom(room.id).catch(() => {});
-      await refreshWallet().catch(() => {});
+      let message = reason.message;
+      if (room?.id) {
+        try {
+          await loadRoom(room.id);
+        } catch (refreshError) {
+          message += ` Room refresh failed: ${refreshError.message}`;
+        }
+      }
+      try {
+        await refreshWallet();
+      } catch (refreshError) {
+        message += ` Wallet refresh failed: ${refreshError.message}`;
+      }
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -328,6 +387,7 @@ function App() {
 
   const gameNumbers = game?.calledNumbers || [];
   const calledSet = useMemo(() => new Set(gameNumbers.map(Number)), [gameNumbers]);
+  const alertMessage = [error, walletError].filter(Boolean).join(' ');
 
   return <div className="app-shell">
     <header className="topbar">
@@ -336,12 +396,12 @@ function App() {
         <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</small></span>
       </div>
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
-        <span aria-hidden="true">💰</span> {wallet === null ? '—' : money(wallet)} <small>ETB</small>
+        <span aria-hidden="true">💰</span> {walletLoading ? '…' : wallet === null ? '—' : money(wallet)} <small>ETB</small>
       </button>
     </header>
 
-    {error && <div className="alert" role="alert"><span>{error}</span>
-      {error.toLowerCase().includes('insufficient balance') && <button onClick={() => go('wallet')}>{t.deposit}</button>}
+    {alertMessage && <div className="alert" role="alert"><span>{alertMessage}</span>
+      {alertMessage.toLowerCase().includes('insufficient balance') && <button onClick={() => go('wallet')}>{t.deposit}</button>}
       <button onClick={() => {
         if (!initData) {
           retryTelegramAuthentication();
@@ -431,7 +491,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
     <section className="section-heading"><div><div className="eyebrow">ROOM #{room.roomNumber || room.id}</div><h2>{t.cards}</h2></div><span className="status status-waiting">{room.status}</span></section>
     <div className="panel cartela-summary">
       <div><small>{t.available}</small><b>{cards.filter((card) => card.state === 'AVAILABLE').length}/100</b></div>
-      <div><small>{t.count}</small><b>{mine.length}/2</b></div>
+      <div><small>{t.count}</small><b>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</b></div>
       <div><small>{t.stake}</small><b>{money(room.stake)} BIRR</b></div>
       <div><small>{t.balance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</b></div>
     </div>
@@ -445,7 +505,7 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack }) {
       onClick={() => onToggle(card)}
     >{card.number}</button>)}</div>
     <div className="sticky-summary panel">
-      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/2</small>
+      <div><small>{t.selected}: {mine.map((card) => `#${card.number}`).join(', ') || '—'} · {mine.length}/{MAX_CARTELAS_PER_PLAYER}</small>
         <b>{t.total}: {money(room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString())} BIRR</b>
       </div>
       <span className="muted">Remaining · {room.selection?.remainingBalance == null ? (wallet === null ? '—' : money(wallet)) : money(room.selection.remainingBalance)} BIRR</span>

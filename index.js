@@ -1795,7 +1795,9 @@ app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next
     } finally {
       connection.release();
     }
-    res.json({ joined: true });
+    const state = await roomSnapshot(req.params.id, req.telegramUser.id);
+    state.wallet = { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) };
+    res.json({ joined: true, ...state });
   } catch (error) {
     next(error);
   }
