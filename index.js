@@ -2079,7 +2079,7 @@ app.get('/api/rooms/:id', authenticatedTelegramUser, async (req, res, next) => {
   }
 });
 
-app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, async (req, res, next) => {
+async function selectCartelaHandler(req, res, next) {
   const connection = await pool.getConnection();
   let transactionStarted = false;
   try {
@@ -2189,9 +2189,11 @@ app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, as
   } finally {
     connection.release();
   }
-});
+}
 
-app.post('/api/rooms/:id/cartelas/:number/deselect', authenticatedTelegramUser, async (req, res, next) => {
+app.post('/api/rooms/:id/cartelas/:number/select', authenticatedTelegramUser, selectCartelaHandler);
+
+async function deselectCartelaHandler(req, res, next) {
   const connection = await pool.getConnection();
   try {
     await initializeSchema();
@@ -2262,6 +2264,23 @@ app.post('/api/rooms/:id/cartelas/:number/deselect', authenticatedTelegramUser, 
   } finally {
     connection.release();
   }
+}
+
+app.post('/api/rooms/:id/cartelas/:number/deselect', authenticatedTelegramUser, deselectCartelaHandler);
+
+app.post('/api/rooms/:id/cartela', authenticatedTelegramUser, (req, res, next) => {
+  const cartelaNumber = Number(req.body?.cartelaNumber);
+  const { action } = req.body || {};
+  if (!Number.isInteger(cartelaNumber) || cartelaNumber < 1 || cartelaNumber > 100) {
+    return next(Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 }));
+  }
+  if (action !== 'select' && action !== 'deselect') {
+    return next(Object.assign(new Error('Cartela action must be select or deselect.'), { status: 400 }));
+  }
+  req.params.number = String(cartelaNumber);
+  return action === 'select'
+    ? selectCartelaHandler(req, res, next)
+    : deselectCartelaHandler(req, res, next);
 });
 
 app.post('/api/rooms/:id/leave', authenticatedTelegramUser, async (req, res, next) => {

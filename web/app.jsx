@@ -14,6 +14,12 @@ const multiplyMoney = (value, multiplier) => {
   const [whole, decimal = '00'] = String(value || '0').split('.');
   return (BigInt(whole) * 100n + BigInt((decimal + '00').slice(0, 2))) * BigInt(multiplier);
 };
+const minorUnitsToMoney = (minorUnits) => {
+  const value = BigInt(minorUnits);
+  const whole = value / 100n;
+  const fraction = (value % 100n).toString().padStart(2, '0');
+  return `${whole.toLocaleString()}.${fraction}`;
+};
 const telegramWebApp = () => window.Telegram?.WebApp;
 const MAX_CARTELAS_PER_PLAYER = 2;
 
@@ -90,6 +96,9 @@ function App() {
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
   const roomStateRevision = useRef(0);
+  const roomSessionRevision = useRef(0);
+  const selectionMutationQueue = useRef(Promise.resolve());
+  const activeSelectionMutations = useRef(0);
   const [game, setGame] = useState(null);
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
@@ -130,8 +139,9 @@ function App() {
     }
   }, [initData]);
 
-  const loadRoom = useCallback(async (id) => {
+  const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current) => {
     const data = await request(`/api/rooms/${encodeURIComponent(id)}`);
+    if (sessionRevision !== roomSessionRevision.current) return data;
     setRoom(withRoomClock(data.room));
     setGame(data.game || null);
     if (data.wallet?.availableBalance !== undefined) {
@@ -296,11 +306,24 @@ function App() {
   };
 
   function returnToLobby() {
+    roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
     setRoom(null);
     setGame(null);
+    setWallet(null);
     setView('play');
-    refreshRooms().catch((reason) => setError(reason.message));
+    Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => setError(reason.message));
+  }
+
+  function resetRoomState() {
+    roomSessionRevision.current += 1;
+    roomStateRevision.current += 1;
+    setRoom(null);
+    setGame(null);
+    setWallet(null);
+    setWalletError('');
+    setView('play');
+    return roomSessionRevision.current;
   }
 
   function retryTelegramAuthentication() {
@@ -326,13 +349,18 @@ function App() {
       setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
       return;
     }
+    const sessionRevision = resetRoomState();
     setBusy(true);
     try {
-      const data = await request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} });
+      const [data, me] = await Promise.all([
+        request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} }),
+        request('/api/me'),
+      ]);
+      if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
       setRoom(withRoomClock(data.room));
       setGame(data.game || null);
-      setWallet(data.wallet.availableBalance);
+      setWallet(me.wallet.availableBalance ?? me.wallet.balance ?? data.wallet.availableBalance);
       setWalletError('');
       setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
       setError('');
@@ -348,47 +376,54 @@ function App() {
     }
   }
 
-  async function toggleCard(card) {
-    if (!room || busy || card.state === 'TAKEN') return;
-    const currentSelectionCount = room.cartelas.filter((item) => item.state === 'MINE').length;
-    if (card.state === 'AVAILABLE' && currentSelectionCount >= MAX_CARTELAS_PER_PLAYER) {
-      setError('Maximum 2 cartelas allowed per room.');
-      return;
+  async function toggleCard(card, action) {
+    if (!room || card.state === 'TAKEN' || !['select', 'deselect'].includes(action)) {
+      throw new Error('This cartela is no longer available.');
     }
+    const roomId = room.id;
+    const sessionRevision = roomSessionRevision.current;
+    activeSelectionMutations.current += 1;
     setBusy(true);
-    try {
-      const action = card.state === 'MINE' ? 'deselect' : 'select';
-      const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas/${card.number}/${action}`, {
-        method: 'POST',
-        body: {},
-      });
+    const operation = selectionMutationQueue.current.then(async () => {
+      if (sessionRevision !== roomSessionRevision.current) throw new Error('Room changed before the selection was saved.');
       roomStateRevision.current += 1;
-      setRoom(withRoomClock(data.room));
-      setWallet(data.wallet.availableBalance);
-      setWalletError('');
-      if (data.room.status === 'PLAYING') {
-        setGame(data.game || null);
-        setView('game');
-      }
-      setError('');
-    } catch (reason) {
-      let message = reason.message;
-      if (room?.id) {
-        try {
-          await loadRoom(room.id);
-        } catch (refreshError) {
-          message += ` Room refresh failed: ${refreshError.message}`;
+      const data = await request(`/api/rooms/${encodeURIComponent(roomId)}/cartela`, {
+        method: 'POST',
+        body: { cartelaNumber: card.number, action },
+      });
+      if (sessionRevision === roomSessionRevision.current) {
+        roomStateRevision.current += 1;
+        setRoom(withRoomClock(data.room));
+        setWallet(data.wallet.availableBalance);
+        setWalletError('');
+        if (data.room.status === 'PLAYING') {
+          setGame(data.game || null);
+          setView('game');
         }
       }
-      try {
-        await refreshWallet();
-      } catch (refreshError) {
-        message += ` Wallet refresh failed: ${refreshError.message}`;
+      return data;
+    });
+    selectionMutationQueue.current = operation.catch(() => {});
+    try {
+      return await operation;
+    } catch (reason) {
+      if (sessionRevision === roomSessionRevision.current) {
+        const message = reason.message;
+        try {
+          await loadRoom(roomId, sessionRevision);
+        } catch (refreshError) {
+          setError(`${message} Room refresh failed: ${refreshError.message}`);
+        }
+        try {
+          await refreshWallet();
+        } catch (refreshError) {
+          setError(`${message} Wallet refresh failed: ${refreshError.message}`);
+        }
       }
-      setError(message);
       throw reason;
     } finally {
-      setBusy(false);
+      activeSelectionMutations.current -= 1;
+      if (activeSelectionMutations.current === 0 && sessionRevision === roomSessionRevision.current) setBusy(false);
     }
   }
 
@@ -397,9 +432,11 @@ function App() {
     setBusy(true);
     try {
       await request(`/api/rooms/${encodeURIComponent(room.id)}/leave`, { method: 'POST', body: {} });
+      roomSessionRevision.current += 1;
       roomStateRevision.current += 1;
       setRoom(null);
       setGame(null);
+      setWallet(null);
       setView('play');
       await Promise.all([refreshWallet(), refreshRooms()]);
     } catch (reason) {
@@ -427,8 +464,8 @@ function App() {
   const calledSet = useMemo(() => new Set(gameNumbers.map(Number)), [gameNumbers]);
   const alertMessage = [error, walletError].filter(Boolean).join(' ');
 
-  return <div className="app-shell">
-    <header className="topbar">
+  return <div className={`app-shell ${view === 'cartelas' ? 'cartela-app-shell' : ''}`}>
+    {view !== 'cartelas' && <header className="topbar">
       <div className="brand-mark">
         <span className="brand-icon" aria-hidden="true">👑</span>
         <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</small></span>
@@ -436,9 +473,9 @@ function App() {
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
         <span aria-hidden="true">💰</span> {walletLoading ? '…' : wallet === null ? '—' : money(wallet)} <small>BIRR</small>
       </button>
-    </header>
+    </header>}
 
-    {alertMessage && <div className="alert" role="alert"><span>{alertMessage}</span>
+    {alertMessage && view !== 'cartelas' && <div className="alert" role="alert"><span>{alertMessage}</span>
       {alertMessage.toLowerCase().includes('insufficient balance') && <button onClick={() => go('wallet')}>{t.deposit}</button>}
       <button onClick={() => {
         if (!initData) {
@@ -452,7 +489,7 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onRefresh={() => loadRoom(room.id)} onBack={returnToLobby} onLeave={leaveRoom} />}
+      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
         setBusy(true);
@@ -522,118 +559,176 @@ function PlayScreen({ t, rooms, roomsLoading, onJoin, busy, onRefresh }) {
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onLeave }) {
-  const cards = room.cartelas || [];
-  const mine = cards.filter((card) => card.state === 'MINE');
-  const [notice, setNotice] = useState('');
+function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
   const [clockNow, setClockNow] = useState(Date.now());
+  const [overrides, setOverrides] = useState({});
+  const [pending, setPending] = useState({});
+  const [balanceBase, setBalanceBase] = useState(wallet);
+  const [potBase, setPotBase] = useState(room.pot ?? room.prizePool);
+  const [notice, setNotice] = useState('');
+  const mutationId = useRef(0);
+  const noticeTimer = useRef(null);
   const waiting = room.status === 'WAITING';
-  const minCartelas = Number(room.minPlayers) || 3;
-  const remainingBalance = room.selection?.remainingBalance ?? wallet;
-  const totalCost = room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString();
   const countdown = room.countdown || {};
   const serverNow = clockNow + Number(countdown.clientOffset || 0);
-  const secondsLeft = Math.max(0, Math.ceil((Number(countdown.deadline) - serverNow) / 1000));
-  const countdownProgress = Math.max(0, Math.min(100, secondsLeft / Number(countdown.durationSeconds || 30) * 100));
-  const selectedCartelas = Number(room.selectedCartelas ?? mine.length);
+  const countdownDeadline = Number(countdown.deadline);
+  const secondsLeft = Number.isFinite(countdownDeadline)
+    ? Math.max(0, Math.ceil((countdownDeadline - serverNow) / 1000))
+    : 30;
+  const cards = (room.cartelas || []).map((card) => ({
+    ...card,
+    state: overrides[card.number]?.state || card.state,
+  }));
+  const mine = cards.filter((card) => card.state === 'MINE');
   const availableCartelas = cards.filter((card) => card.state === 'AVAILABLE').length;
-  const enoughCartelas = selectedCartelas >= minCartelas;
+  const pendingValues = Object.values(pending);
+  const pendingBalanceDelta = pendingValues.reduce((sum, item) => sum + item.balanceDelta, 0n);
+  const pendingPotDelta = pendingValues.reduce((sum, item) => sum + item.potDelta, 0n);
+  const displayBalance = balanceBase === null || balanceBase === undefined
+    ? null
+    : minorUnitsToMoney(multiplyMoney(balanceBase, 1) + pendingBalanceDelta);
+  const displayPot = minorUnitsToMoney(multiplyMoney(potBase || '0', 1) + pendingPotDelta);
+  const stakeMinorUnits = multiplyMoney(room.stake, 1);
+  const stakeLabel = money(room.stake).replace(/\.00$/, '');
+  const timerLabel = waiting
+    ? secondsLeft < 60 ? `${secondsLeft}s` : `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
+    : room.status;
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 250);
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
+
+  useEffect(() => {
+    if (Object.keys(pending).length === 0) {
+      setBalanceBase(wallet);
+      setPotBase(room.pot ?? room.prizePool);
+    }
+  }, [wallet, room.pot, room.prizePool, pending]);
+
+  useEffect(() => {
+    setOverrides((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const [number, value] of Object.entries(current)) {
+        if (!value.pendingId && room.cartelas?.find((card) => Number(card.number) === Number(number))?.state === value.state) {
+          delete next[number];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [room.cartelas]);
+
+  function showNotice(message) {
+    window.clearTimeout(noticeTimer.current);
+    setNotice(message);
+    noticeTimer.current = window.setTimeout(() => setNotice(''), 2600);
+  }
+
   async function chooseCartela(card) {
-    if (busy || !waiting) return;
-    if (card.state === 'TAKEN') {
-      setNotice('This cartela has already been selected by another player.');
+    if (!waiting) return;
+    if (card.state === 'TAKEN' || overrides[card.number]?.pendingId) return;
+    const action = card.state === 'MINE' ? 'deselect' : 'select';
+    const selectedCount = cards.filter((item) => item.state === 'MINE').length;
+    if (action === 'select' && selectedCount >= MAX_CARTELAS_PER_PLAYER) {
+      showNotice('Maximum 2 cartelas allowed');
       return;
     }
+    if (action === 'select' && (displayBalance === null || multiplyMoney(displayBalance, 1) < stakeMinorUnits)) {
+      showNotice('Insufficient balance.');
+      return;
+    }
+
+    const id = ++mutationId.current;
+    const nextState = action === 'select' ? 'MINE' : 'AVAILABLE';
+    const balanceDelta = action === 'select' ? -stakeMinorUnits : stakeMinorUnits;
+    const potDelta = (action === 'select' ? 1n : -1n) * (stakeMinorUnits * 80n / 100n);
+    setOverrides((current) => ({ ...current, [card.number]: { state: nextState, pendingId: id } }));
+    setPending((current) => ({ ...current, [id]: { balanceDelta, potDelta } }));
     setNotice('');
     try {
-      await onToggle(card);
-      setNotice(card.state === 'MINE'
-        ? `Cartela #${card.number} deselected and refunded.`
-        : `Cartela #${card.number} selected successfully!`);
-    } catch {
-      setNotice('');
+      telegramWebApp()?.HapticFeedback?.impactOccurred?.('light');
+      const result = await onToggle(card, action);
+      setBalanceBase(result.wallet.availableBalance);
+      setPotBase(result.room.pot ?? result.room.prizePool);
+      setPending((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      setOverrides((current) => current[card.number]?.pendingId === id
+        ? { ...current, [card.number]: { state: nextState, pendingId: null } }
+        : current);
+    } catch (error) {
+      telegramWebApp()?.HapticFeedback?.notificationOccurred?.('error');
+      setPending((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      setOverrides((current) => {
+        if (current[card.number]?.pendingId !== id) return current;
+        const next = { ...current };
+        delete next[card.number];
+        return next;
+      });
+      showNotice(error.message || 'Selection failed. Please try again.');
     }
   }
 
-  return <>
-    <div className="cartela-topline">
-      <button className="text-button" onClick={onBack}>← Back</button>
-      <span>ROOM #{room.roomNumber || room.id}</span>
-      <span />
-    </div>
-    <h1 className="cartela-title">SELECT CARTELAS</h1>
-    <section className="cartela-metrics panel" aria-label="Room and balance summary">
-      <div><small>BALANCE</small><b>{wallet === null ? t.unavailable : money(wallet)}</b><span>BIRR</span></div>
-      <div><small>COST</small><b>{money(room.stake)}</b><span>BIRR / CARD</span></div>
-      <div><small>POT</small><b>{money(room.pot ?? room.prizePool)}</b><span>BIRR</span></div>
-      <div><small>STARTS</small><b>{waiting ? `${String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:${String(secondsLeft % 60).padStart(2, '0')}` : room.status}</b><span>{waiting ? 'COUNTDOWN' : 'STATUS'}</span></div>
+  return <div className="cartela-screen">
+    <header className="cartela-screen-header">
+      <button className="cartela-back" disabled={busy} onClick={onBack}>← Back</button>
+      <div className="cartela-brand-title"><strong>SHISHO BINGO</strong><small>ሺሾ ቢንጎ</small></div>
+      <span aria-hidden="true" />
+    </header>
+    <section className="cartela-hud" aria-label="Room metrics">
+      <div className="cartela-hud-card"><small>BALANCE</small><b>{displayBalance === null ? t.unavailable : displayBalance}</b></div>
+      <div className="cartela-hud-card"><small>COST</small><b>{stakeLabel}</b></div>
+      <div className="cartela-hud-card pot"><small>POT</small><b>{displayPot.replace(/\.00$/, '')}</b></div>
+      <div className="cartela-hud-card starts-in"><small>STARTS IN</small><b>{timerLabel}</b></div>
     </section>
-    <section className="countdown-panel panel" aria-live="polite">
-      <div className="countdown-copy">
-        <div><small>GAME STARTS IN</small><strong>{String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:{String(secondsLeft % 60).padStart(2, '0')}</strong></div>
-        <span className={`countdown-status ${enoughCartelas ? 'players-ready' : ''}`}>
-          {enoughCartelas ? 'MINIMUM CARTELAS REACHED' : 'WAITING FOR CARTELAS'}
-        </span>
-      </div>
-      <div className="countdown-track" role="progressbar" aria-label="Time remaining" aria-valuemin="0" aria-valuemax="30" aria-valuenow={secondsLeft}>
-        <span style={{ width: `${countdownProgress}%` }} />
-      </div>
-      <p>{selectedCartelas}/{minCartelas} CARTELAS · {room.currentPlayers} ACTIVE PLAYERS · Room #{room.roomNumber || room.id} · {room.status}</p>
-    </section>
-    {!waiting && <p className="room-closed-note" role="status">Players ready! Starting Bingo... Cartela selection is closed.</p>}
-    {notice && <p className="cartela-notice" role="status">{notice}</p>}
-    <section className="cartela-picker panel">
-      <div className="cartela-picker-heading">
-        <h2>🎟 CARTELA NUMBERS</h2>
-        <span>Select 1–2</span>
-      </div>
-      <p className="cartela-picker-summary">{mine.length}/{MAX_CARTELAS_PER_PLAYER} selected · {money(totalCost)} BIRR spent · {remainingBalance === null ? '—' : `${money(remainingBalance)} BIRR remaining`}</p>
-      {cards.length !== 100
-        ? <div className="empty" role="alert"><strong>Could not load all 100 cartelas.</strong><p>Loaded {cards.length}. Refresh to retry.</p><button className="outline-button" disabled={busy} onClick={onRefresh}>Retry</button></div>
-        : <div className="cartela-grid">{cards.map((card) => <button
+    {!waiting && <p className="cartela-closed-note" role="status">This room no longer accepts cartela changes.</p>}
+    {cards.length !== 100
+      ? <div className="cartela-load-error" role="alert">Could not load all 100 cartelas ({cards.length}/100).</div>
+      : <div className="cartela-grid-8col" aria-label="Choose a cartela">
+        {cards.map((card) => <button
           key={`${room.id}-${card.number}`}
-          className={`cartela cartela-${String(card.state).toLowerCase()} ${busy ? 'processing' : ''}`}
-          disabled={busy || !waiting}
-          aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected by you, tap to deselect and refund' : card.state === 'TAKEN' ? 'reserved by another player' : 'available, tap to select'}`}
+          className={`cartela-btn ${card.state === 'MINE' ? 'mine' : card.state === 'TAKEN' ? 'taken' : ''}`}
+          disabled={card.state === 'TAKEN' || !waiting || Boolean(overrides[card.number]?.pendingId)}
+          aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected, tap to deselect' : card.state === 'TAKEN' ? 'taken' : 'available, tap to select'}`}
           onClick={() => chooseCartela(card)}
-        >
-          {card.state === 'MINE' ? <><span>{card.number}</span><b aria-hidden="true">✓</b></> : card.state === 'TAKEN' ? <><span>{card.number}</span><b aria-hidden="true">🔒</b></> : card.number}
-        </button>)}</div>}
-      <div className="cartela-legend"><span><i className="available-dot" />Available</span><span><i className="mine-dot" />Yours</span><span><i className="taken-dot" />Reserved</span></div>
-      <button className="outline-button cartela-refresh" disabled={busy} onClick={onRefresh}>↻ Refresh availability</button>
-    </section>
-    <section className="selected-previews" aria-label="Your selected cartelas">
-      <h2>YOUR SELECTED CARTELA{mine.length === 1 ? '' : 'S'} <span>{mine.length}/{MAX_CARTELAS_PER_PLAYER}</span></h2>
+        >{card.number}</button>)}
+      </div>}
+    <section className="cartela-previews" aria-label="Selected cartela previews">
       {mine.length
-        ? mine.map((card) => <article className="selected-cartela panel" key={card.number}>
-          <header><div><strong>CARTELA #{card.number}</strong><small>ROOM #{room.roomNumber || room.id}</small></div><span>✓ SELECTED</span></header>
-          <div className="selected-board">
-            {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="selected-column" key={letter}>
+        ? mine.map((card) => <article className="cartela-preview-card" key={card.number}>
+          <h2>Cartela #{card.number}</h2>
+          <div className="cartela-preview-board">
+            {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="cartela-preview-column" key={letter}>
               <b>{letter}</b>
               {[0, 1, 2, 3, 4].map((row) => {
                 const value = card.numbers?.[row * 5 + column];
-                return <span className={value === 'FREE' ? 'selected-free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
+                return <span className={value === 'FREE' ? 'free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
               })}
             </div>)}
           </div>
-          <footer><span>{money(room.stake)} BIRR</span><button className="danger-button" disabled={busy || !waiting} onClick={() => chooseCartela(card)}>DESELECT &amp; REFUND</button></footer>
         </article>)
-        : <p className="selected-empty panel">Select up to 2 cartelas to preview</p>}
+        : <p className="cartela-preview-placeholder">Select up to 2 cartelas to preview</p>}
     </section>
-    <section className="cartela-room-footer panel" aria-label="Room summary and actions">
-      <div><b>✓ {mine.length}/{MAX_CARTELAS_PER_PLAYER}</b><small>SELECTED</small></div>
-      <div><b>⊞ {availableCartelas}/100</b><small>AVAILABLE</small></div>
-      <div><b>👥 {room.currentPlayers}</b><small>PLAYERS</small></div>
-      <button className="danger-button" disabled={busy || !waiting} onClick={onLeave}>← LEAVE ROOM</button>
-    </section>
-    {!waiting && <p className="room-closed-note">This room no longer accepts cartela changes.</p>}
-  </>;
+    <aside className="cartela-bottom-hud" aria-label="Room summary">
+      <div className="cartela-bottom-counts">
+        <span>☑ {mine.length}/{MAX_CARTELAS_PER_PLAYER}</span>
+        <span>▦ {availableCartelas}/100</span>
+        <span>👤 {room.currentPlayers}</span>
+      </div>
+      <button className="cartela-leave-button" disabled={busy || !waiting} onClick={onLeave}>← LEAVE ROOM</button>
+    </aside>
+    {notice && <div className="cartela-toast" role="status">{notice}</div>}
+  </div>;
 }
 
 function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh }) {
@@ -1059,6 +1154,44 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-room-footer>div>b{overflow:hidden;color:#f7f1fd;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
 .cartela-room-footer>div>small{color:#a996ba;font-size:7px;font-weight:850;letter-spacing:.08em}
 .cartela-room-footer>.danger-button{grid-column:1/-1;justify-content:center;width:100%;margin:0;padding:10px;font-size:10px}
+.cartela-app-shell{max-width:430px;padding:0 0 calc(112px + env(safe-area-inset-bottom));background:#0f0920}
+.cartela-app-shell>.content{padding:0}
+.cartela-app-shell .cartela-screen{min-height:100dvh;padding-bottom:8px;background:#0f0920}
+.cartela-screen-header{position:relative;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;min-height:88px;padding:calc(10px + env(safe-area-inset-top)) 14px 12px;background:#0f0920;text-align:center}
+.cartela-back{justify-self:start;padding:8px 10px;border:0;border-radius:22px;background:#0b0716;color:#fff;font-size:14px;font-weight:700}
+.cartela-brand-title{display:grid;gap:3px}
+.cartela-brand-title strong{color:#d8b84c;font-size:15px;font-weight:900;letter-spacing:.16em;white-space:nowrap}
+.cartela-brand-title small{color:#a89abc;font-size:9px;font-weight:800;letter-spacing:.24em}
+.cartela-hud{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:10px 14px 13px;background:#211331;border-bottom:1px solid #2d1b54}
+.cartela-hud-card{display:grid;align-content:center;justify-items:center;min-width:0;min-height:56px;padding:7px 3px;border:1px solid #2d1b54;border-radius:7px;background:#130a20;text-align:center}
+.cartela-hud-card small{color:#9d93a9;font-size:10px;font-weight:800;letter-spacing:.04em}
+.cartela-hud-card b{max-width:100%;overflow:hidden;margin-top:3px;color:#fff;font-size:15px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}
+.cartela-hud-card.pot b{color:#e3c24f}
+.cartela-hud-card.starts-in b{color:#ef4444}
+.cartela-grid-8col{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:12px 14px}
+.cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;aspect-ratio:1;border:1px solid #49316c;border-radius:10px;background:#281a4a;color:#fff;font-size:14px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
+.cartela-btn:active{transform:scale(.92)}
+.cartela-btn.taken{border-color:#6b1d31;background:#521626;color:#ffffff66;pointer-events:none}
+.cartela-btn.mine{border-color:#35dbad;background:#10b981;color:#fff;box-shadow:0 0 10px #10b98166}
+.cartela-btn:disabled{opacity:1}
+.cartela-previews{display:grid;gap:9px;padding:2px 14px 18px}
+.cartela-preview-placeholder{margin:0;padding:12px 2px;color:#8b7fa8;font-size:12px;text-align:center}
+.cartela-preview-card{padding:10px;border:1px solid #2d1b54;border-radius:12px;background:#1c1033}
+.cartela-preview-card h2{margin:0 0 8px;color:#efeaf8;font-size:13px}
+.cartela-preview-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
+.cartela-preview-column{display:grid;grid-template-rows:24px repeat(5,minmax(29px,1fr));gap:3px}
+.cartela-preview-column>*{display:grid;place-items:center;min-width:0;border:1px solid #33234b;border-radius:5px;background:#130a20;color:#f7f3fc;font-size:10px;font-weight:750}
+.cartela-preview-column>b{background:#281a4a;color:#d8b84c;font-size:12px}
+.cartela-preview-column .free{background:#5b4215;color:#ffe284;font-size:8px}
+.cartela-bottom-hud{position:fixed;bottom:0;left:50%;z-index:8;display:grid;gap:11px;width:min(100%,430px);padding:13px 14px calc(14px + env(safe-area-inset-bottom));transform:translateX(-50%);border-top:1px solid #2d1b54;background:#1c1033f5;box-shadow:0 -9px 25px #090414a8;backdrop-filter:blur(12px)}
+.cartela-bottom-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:center;text-align:center}
+.cartela-bottom-counts span{overflow:hidden;color:#f5f0fc;font-size:13px;font-weight:850;text-overflow:ellipsis;white-space:nowrap}
+.cartela-leave-button{min-height:42px;border:1px solid #35214f;border-radius:13px;background:#1b1030;color:#9286a6;font-size:13px;font-weight:850;letter-spacing:.04em}
+.cartela-leave-button:disabled{opacity:.5}
+.cartela-toast{position:fixed;bottom:calc(112px + env(safe-area-inset-bottom));left:50%;z-index:12;width:max-content;max-width:calc(100% - 30px);padding:9px 14px;transform:translateX(-50%);border:1px solid #4a3365;border-radius:11px;background:#201433;color:#fff;font-size:12px;font-weight:700;text-align:center;box-shadow:0 5px 18px #0008}
+.cartela-closed-note,.cartela-load-error{margin:8px 14px;padding:9px 10px;border:1px solid #573b2a;border-radius:10px;background:#20152a;color:#edc47c;font-size:11px}
+@media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:10px;padding-left:10px}.cartela-btn{border-radius:8px;font-size:12px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
+@media(min-width:600px){.cartela-grid-8col{gap:8px;padding-right:20px;padding-left:20px}.cartela-btn{font-size:15px}}
 `;
 
 createRoot(document.getElementById('root')).render(<App />);

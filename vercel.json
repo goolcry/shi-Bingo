@@ -3,12 +3,7 @@
   "crons": [
     {
       "path": "/api/cron/rooms",
-      "schedule": "* * * * *"
+      "schedule": "0 0 * * *"
     }
-  ],
-  "functions": {
-    "index.js": {
-      "includeFiles": "public/mini-app.js"
-    }
-  }
+  ]
 }
