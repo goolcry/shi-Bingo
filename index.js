@@ -1560,7 +1560,7 @@ function parseCartela(value) {
   return parsed;
 }
 
-async function countValidReservationOwners(connection, roomId) {
+async function countValidReservations(connection, roomId) {
   const [reservations] = await connection.execute(
     `SELECT r.telegram_id, s.numbers
      FROM cartela_reservations r
@@ -1573,15 +1573,17 @@ async function countValidReservationOwners(connection, roomId) {
     [roomId],
   );
   const validPlayers = new Set();
+  let validCartelas = 0;
   for (const reservation of reservations) {
     try {
       parseCartela(reservation.numbers);
       validPlayers.add(String(reservation.telegram_id));
+      validCartelas += 1;
     } catch (error) {
       if (error.code !== 'INVALID_CARTELA_DATA') throw error;
     }
   }
-  return validPlayers.size;
+  return { cartelas: validCartelas, players: validPlayers.size };
 }
 
 async function repairRoomCartelas(connection, roomId) {
@@ -1774,8 +1776,8 @@ async function startDueRoom(roomId) {
       return null;
     }
 
-    const validPlayers = await countValidReservationOwners(connection, roomId);
-    if (validPlayers >= Number(room.min_players)) {
+    const validReservations = await countValidReservations(connection, roomId);
+    if (validReservations.cartelas >= Number(room.min_players)) {
       await connection.execute(
         `UPDATE bingo_rooms SET status = 'PLAYING', started_at = CURRENT_TIMESTAMP,
          last_call_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'WAITING'`,
@@ -1878,7 +1880,7 @@ async function roomSnapshot(roomId, telegramId) {
      WHERE room_id = ? AND left_at IS NULL`,
     [roomId],
   );
-  const selectedPlayers = await countValidReservationOwners(pool, roomId);
+  const reservationCounts = await countValidReservations(pool, roomId);
   const [winners] = await pool.execute(
     `SELECT w.telegram_id, u.first_name, w.cartela_number, w.pattern, w.prize
      FROM game_winners w JOIN users u ON u.telegram_id = w.telegram_id
@@ -1912,8 +1914,10 @@ async function roomSnapshot(roomId, telegramId) {
       minPlayers: Number(room.min_players),
       maxPlayers: Number(room.max_players),
       currentPlayers: Number(players[0].count),
-      selectedPlayers,
+      selectedPlayers: reservationCounts.players,
+      selectedCartelas: reservationCounts.cartelas,
       prizePool: formatAmount(room.prize_pool),
+      pot: minorUnitsToDecimal(decimalToMinorUnits(room.prize_pool) * 80n / 100n),
       status: room.status,
       countdown: {
         startedAt: Number(room.selection_started_at_ms),

@@ -528,14 +528,16 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onL
   const [notice, setNotice] = useState('');
   const [clockNow, setClockNow] = useState(Date.now());
   const waiting = room.status === 'WAITING';
-  const minPlayers = Number(room.minPlayers) || 3;
+  const minCartelas = Number(room.minPlayers) || 3;
   const remainingBalance = room.selection?.remainingBalance ?? wallet;
   const totalCost = room.selection?.totalCost ?? multiplyMoney(room.stake, mine.length).toString();
   const countdown = room.countdown || {};
   const serverNow = clockNow + Number(countdown.clientOffset || 0);
   const secondsLeft = Math.max(0, Math.ceil((Number(countdown.deadline) - serverNow) / 1000));
   const countdownProgress = Math.max(0, Math.min(100, secondsLeft / Number(countdown.durationSeconds || 30) * 100));
-  const enoughPlayers = Number(room.selectedPlayers || 0) >= minPlayers;
+  const selectedCartelas = Number(room.selectedCartelas ?? mine.length);
+  const availableCartelas = cards.filter((card) => card.state === 'AVAILABLE').length;
+  const enoughCartelas = selectedCartelas >= minCartelas;
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 250);
@@ -563,26 +565,26 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onL
     <div className="cartela-topline">
       <button className="text-button" onClick={onBack}>← Back</button>
       <span>ROOM #{room.roomNumber || room.id}</span>
-      <button className="text-button cartela-leave" disabled={busy || !waiting} onClick={onLeave}>Leave</button>
+      <span />
     </div>
     <h1 className="cartela-title">SELECT CARTELAS</h1>
     <section className="cartela-metrics panel" aria-label="Room and balance summary">
       <div><small>BALANCE</small><b>{wallet === null ? t.unavailable : money(wallet)}</b><span>BIRR</span></div>
       <div><small>COST</small><b>{money(room.stake)}</b><span>BIRR / CARD</span></div>
-      <div><small>POT</small><b>{money(room.prizePool)}</b><span>BIRR</span></div>
+      <div><small>POT</small><b>{money(room.pot ?? room.prizePool)}</b><span>BIRR</span></div>
       <div><small>STARTS</small><b>{waiting ? `${String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:${String(secondsLeft % 60).padStart(2, '0')}` : room.status}</b><span>{waiting ? 'COUNTDOWN' : 'STATUS'}</span></div>
     </section>
     <section className="countdown-panel panel" aria-live="polite">
       <div className="countdown-copy">
         <div><small>GAME STARTS IN</small><strong>{String(Math.floor(secondsLeft / 60)).padStart(2, '0')}:{String(secondsLeft % 60).padStart(2, '0')}</strong></div>
-        <span className={`countdown-status ${enoughPlayers ? 'players-ready' : ''}`}>
-          {enoughPlayers ? 'MINIMUM PLAYERS REACHED' : 'WAITING FOR PLAYERS'}
+        <span className={`countdown-status ${enoughCartelas ? 'players-ready' : ''}`}>
+          {enoughCartelas ? 'MINIMUM CARTELAS REACHED' : 'WAITING FOR CARTELAS'}
         </span>
       </div>
       <div className="countdown-track" role="progressbar" aria-label="Time remaining" aria-valuemin="0" aria-valuemax="30" aria-valuenow={secondsLeft}>
         <span style={{ width: `${countdownProgress}%` }} />
       </div>
-      <p>{room.selectedPlayers || 0}/{minPlayers} PLAYERS · Room #{room.roomNumber || room.id} · {room.status}</p>
+      <p>{selectedCartelas}/{minCartelas} CARTELAS · {room.currentPlayers} ACTIVE PLAYERS · Room #{room.roomNumber || room.id} · {room.status}</p>
     </section>
     {!waiting && <p className="room-closed-note" role="status">Players ready! Starting Bingo... Cartela selection is closed.</p>}
     {notice && <p className="cartela-notice" role="status">{notice}</p>}
@@ -622,7 +624,13 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onRefresh, onBack, onL
           </div>
           <footer><span>{money(room.stake)} BIRR</span><button className="danger-button" disabled={busy || !waiting} onClick={() => chooseCartela(card)}>DESELECT &amp; REFUND</button></footer>
         </article>)
-        : <p className="selected-empty panel">Your selected cartela previews will appear here after the server confirms a selection.</p>}
+        : <p className="selected-empty panel">Select up to 2 cartelas to preview</p>}
+    </section>
+    <section className="cartela-room-footer panel" aria-label="Room summary and actions">
+      <div><b>✓ {mine.length}/{MAX_CARTELAS_PER_PLAYER}</b><small>SELECTED</small></div>
+      <div><b>⊞ {availableCartelas}/100</b><small>AVAILABLE</small></div>
+      <div><b>👥 {room.currentPlayers}</b><small>PLAYERS</small></div>
+      <button className="danger-button" disabled={busy || !waiting} onClick={onLeave}>← LEAVE ROOM</button>
     </section>
     {!waiting && <p className="room-closed-note">This room no longer accepts cartela changes.</p>}
   </>;
@@ -1043,8 +1051,14 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .selected-cartela>footer .danger-button{width:auto;margin:0;padding:7px 9px;font-size:8px}
 .selected-empty{margin:0;padding:13px;border-color:#39264c;color:#a996ba;font-size:9px}
 .cartela-notice{margin:0 0 9px;padding:8px 10px;border:1px solid #493263;border-radius:10px;background:#170d21;color:#e4d9ed;font-size:10px}
-@media(max-width:370px){.cartela-picker .cartela-grid{gap:4px}.cartela-picker .cartela{min-height:44px;border-radius:9px;font-size:11px}.selected-column{grid-template-rows:22px repeat(5,minmax(27px,1fr))}}
-@media(min-width:600px){.cartela-picker .cartela-grid{grid-template-columns:repeat(8,minmax(0,1fr))}.cartela-picker .cartela{min-height:48px}.selected-board{max-width:400px}}
+@media(max-width:370px){.cartela-picker .cartela-grid{grid-template-columns:repeat(8,minmax(0,1fr));gap:4px}.cartela-picker .cartela{min-height:36px;border-radius:8px;font-size:10px}.selected-column{grid-template-rows:22px repeat(5,minmax(27px,1fr))}}
+@media(min-width:371px){.cartela-picker .cartela-grid{grid-template-columns:repeat(8,minmax(0,1fr))}}
+@media(min-width:600px){.cartela-picker .cartela-grid{grid-template-columns:repeat(10,minmax(0,1fr))}.cartela-picker .cartela{min-height:44px}.selected-board{max-width:400px}}
+.cartela-room-footer{position:sticky;bottom:calc(8px + env(safe-area-inset-bottom));z-index:4;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin:12px 0 5px;padding:10px;border-color:#493263;border-radius:15px;background:#150c20f2;box-shadow:0 8px 26px #05020bbb;backdrop-filter:blur(12px)}
+.cartela-room-footer>div{display:grid;justify-items:center;gap:3px;min-width:0}
+.cartela-room-footer>div>b{overflow:hidden;color:#f7f1fd;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
+.cartela-room-footer>div>small{color:#a996ba;font-size:7px;font-weight:850;letter-spacing:.08em}
+.cartela-room-footer>.danger-button{grid-column:1/-1;justify-content:center;width:100%;margin:0;padding:10px;font-size:10px}
 `;
 
 createRoot(document.getElementById('root')).render(<App />);
