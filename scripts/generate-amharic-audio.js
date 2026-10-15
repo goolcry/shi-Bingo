@@ -19,20 +19,18 @@ const amharicWords = {
   66: 'ስድሳ ስድስት', 67: 'ስድሳ ሰባት', 68: 'ስድሳ ስምንት', 69: 'ስድሳ ዘጠኝ', 70: 'ሰባ',
   71: 'ሰባ አንድ', 72: 'ሰባ ሁለት', 73: 'ሰባ ሦስት', 74: 'ሰባ አራት', 75: 'ሰባ አምስት',
 };
+const amharicLetters = [
+  { through: 15, name: 'ቢ' },
+  { through: 30, name: 'አይ' },
+  { through: 45, name: 'ኤን' },
+  { through: 60, name: 'ጂ' },
+  { through: 75, name: 'ኦ' },
+];
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function downloadNumberAudio(number, text) {
   const outputPath = path.join(outputDir, `${number}.mp3`);
-  try {
-    const existing = await fs.stat(outputPath);
-    if (existing.size > 100) {
-      console.log(`Skipping ${number}: existing audio file is ${existing.size} bytes.`);
-      return;
-    }
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
 
   const url = new URL('https://translate.google.com/translate_tts');
   url.search = new URLSearchParams({
@@ -70,9 +68,10 @@ async function downloadNumberAudio(number, text) {
 
 async function main() {
   await fs.mkdir(outputDir, { recursive: true });
-  console.log('Generating Amharic number call audio for 1–75.');
+  console.log('Regenerating Amharic B-I-N-G-O number call audio for 1–75.');
   for (let number = 1; number <= 75; number += 1) {
-    await downloadNumberAudio(number, amharicWords[number]);
+    const letter = amharicLetters.find((column) => number <= column.through)?.name;
+    await downloadNumberAudio(number, `${letter} ${amharicWords[number]}`);
     await delay(250);
   }
   console.log(`All 75 Amharic clips are available in ${outputDir}.`);

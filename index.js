@@ -2040,7 +2040,7 @@ async function roomSnapshot(roomId, telegramId) {
     [roomId],
   );
   const reservationCounts = await countValidReservations(pool, roomId);
-  const winners = await roomWinnerResults(pool, roomId);
+  let winners = await roomWinnerResults(pool, roomId);
   const [[selection]] = await pool.execute(
     `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0.00) AS total_cost
      FROM cartela_reservations
@@ -2062,6 +2062,18 @@ async function roomSnapshot(roomId, telegramId) {
       progress: numbers ? Math.round(hits / 25 * 100) : 0,
     };
   });
+  if (room.status !== 'FINISHED') {
+    const [[latestStatus]] = await pool.execute(
+      `SELECT status, UNIX_TIMESTAMP(finished_at) * 1000 AS finished_at_ms
+       FROM bingo_rooms WHERE id = ?`,
+      [roomId],
+    );
+    if (latestStatus) {
+      room.status = latestStatus.status;
+      room.finished_at_ms = latestStatus.finished_at_ms;
+      if (room.status === 'FINISHED') winners = await roomWinnerResults(pool, roomId);
+    }
+  }
   return {
     room: {
       id: String(room.id),

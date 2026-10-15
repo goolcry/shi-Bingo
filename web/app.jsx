@@ -31,11 +31,12 @@ if (callAudio) {
 }
 function unlockAudio() {
   if (audioUnlocked || audioUnlockInFlight || !callAudio) return;
-  const unlockSource = '/audio/amharic/1.mp3';
+  const unlockSource = '/audio/amharic/1.mp3?v=3';
   audioUnlockInFlight = true;
   callAudio.volume = 0;
   callAudio.onerror = null;
   callAudio.src = unlockSource;
+  callAudio.load();
   callAudio.play().then(() => {
     audioUnlocked = true;
     if (callAudio.src.endsWith(unlockSource)) {
@@ -71,13 +72,21 @@ const amharicNumberWords = (number) => {
   const remainder = number % 10;
   return remainder ? `${tens[Math.floor(number / 10)]} ${amharicNumbers[remainder]}` : tens[Math.floor(number / 10)];
 };
+const amharicCallText = (number) => {
+  const letter = number <= 15 ? 'ቢ'
+    : number <= 30 ? 'አይ'
+      : number <= 45 ? 'ኤን'
+        : number <= 60 ? 'ጂ' : 'ኦ';
+  return `${letter} ${amharicNumberWords(number)}`;
+};
 function playAmharicBall(ballNumber, soundEnabled, onBlocked) {
   if (!soundEnabled || !ballNumber || !callAudio) return;
   try {
     callAudio.pause();
     callAudio.currentTime = 0;
-    callAudio.src = `/audio/amharic/${ballNumber}.mp3`;
+    callAudio.src = `/audio/amharic/${ballNumber}.mp3?v=3`;
     callAudio.volume = 1;
+    callAudio.load();
     callAudio.play().catch((error) => {
       console.warn(`[Amharic audio play blocked for #${ballNumber}]:`, error.message);
       onBlocked?.(error);
@@ -310,6 +319,7 @@ function App() {
   const [room, setRoom] = useState(null);
   const roomStateRevision = useRef(0);
   const roomSessionRevision = useRef(0);
+  const finishedRoomId = useRef(null);
   const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
   const activeSelectionMutations = useRef(0);
@@ -356,6 +366,14 @@ function App() {
     const requestStartedAt = Date.now();
     const data = await request(`/api/rooms/${encodeURIComponent(id)}/state`, { signal });
     if (sessionRevision !== roomSessionRevision.current) return data;
+    const roomId = String(id);
+    const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+    if (finishedRoomId.current === roomId && !isFinished) return data;
+    if (isFinished) {
+      finishedRoomId.current = String(id);
+    } else if (finishedRoomId.current !== roomId) {
+      finishedRoomId.current = null;
+    }
     setRoom(withRoomClock(data.room));
     setGame(gameWithClockOffset(data.game, requestStartedAt));
     if (data.wallet?.availableBalance !== undefined) {
@@ -412,6 +430,7 @@ function App() {
         if (result.success !== true || result.accepted !== true) {
           throw new Error(result.error || 'Bingo claim was not accepted.');
         }
+        finishedRoomId.current = roomId;
         const called = Array.isArray(result.calledNumbers) ? result.calledNumbers : claimedNumbers;
         setRoom((current) => current && String(current.id) === roomId
           ? { ...current, status: 'FINISHED', finishedAt: result.finishedAt ?? current.finishedAt }
@@ -439,6 +458,7 @@ function App() {
           setRoom(withRoomClock(latest.room));
           setGame(gameWithClockOffset(latest.game, requestStartedAt));
           if (latest.room.status === 'FINISHED' || latest.game?.status === 'FINISHED') {
+            finishedRoomId.current = roomId;
             setPendingBingoClaim(null);
             if (latest.room.status !== 'FINISHED') {
               setRoom((current) => current && String(current.id) === roomId
@@ -615,6 +635,10 @@ function App() {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/state`);
         const responseReceivedAt = Date.now();
         if (!active || revision !== roomStateRevision.current) return;
+        const roomId = String(room.id);
+        const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+        if (finishedRoomId.current === roomId && !isFinished) return;
+        if (isFinished) finishedRoomId.current = roomId;
         const currentNumber = data.game?.currentNumber ?? null;
         if (lastGameCall.current.roomId === room.id
           && currentNumber !== null && lastGameCall.current.number !== null
@@ -625,7 +649,7 @@ function App() {
         setRoom(withRoomClock(data.room));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
-        if (data.room.status === 'FINISHED' || data.game?.status === 'FINISHED') {
+        if (isFinished) {
           setPendingBingoClaim(null);
           if (data.room.status !== 'FINISHED') {
             setRoom((current) => current && String(current.id) === String(room.id)
@@ -688,6 +712,7 @@ function App() {
   function returnToLobby() {
     roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
+    finishedRoomId.current = null;
     setRoom(null);
     setGame(null);
     setView('play');
@@ -728,6 +753,7 @@ function App() {
       setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
       return;
     }
+    if (String(item.id) !== String(room?.id)) finishedRoomId.current = null;
     const sessionRevision = resetRoomState({ keepCurrentView });
     setBusy(true);
     try {
@@ -1288,14 +1314,14 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
         }
         if (!voices.some((voice) => voice.lang.toLowerCase().startsWith('am'))) {
           window.speechSynthesis.cancel();
-          const utterance = new window.SpeechSynthesisUtterance(amharicNumberWords(currentNumber));
+          const utterance = new window.SpeechSynthesisUtterance(amharicCallText(currentNumber));
           utterance.lang = 'am-ET';
           utterance.rate = 0.9;
           utterance.onerror = (event) => console.warn('[Amharic speech fallback failed]:', event.error);
           window.speechSynthesis.speak(utterance);
           return;
         }
-        const utterance = new window.SpeechSynthesisUtterance(amharicNumberWords(currentNumber));
+        const utterance = new window.SpeechSynthesisUtterance(amharicCallText(currentNumber));
         utterance.lang = 'am-ET';
         utterance.rate = 0.9;
         utterance.onerror = (event) => console.warn('[Amharic speech playback failed]:', event.error);
