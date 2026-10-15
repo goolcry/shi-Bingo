@@ -22,6 +22,88 @@ const minorUnitsToMoney = (minorUnits) => {
 };
 const telegramWebApp = () => window.Telegram?.WebApp;
 const MAX_CARTELAS_PER_PLAYER = 2;
+let audioUnlocked = false;
+let audioUnlockInFlight = false;
+function unlockAudio() {
+  if (audioUnlocked || audioUnlockInFlight) return;
+  audioUnlockInFlight = true;
+  const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+  silentAudio.volume = 0;
+  silentAudio.play().then(() => {
+    audioUnlocked = true;
+    document.removeEventListener('click', unlockAudio);
+    document.removeEventListener('touchstart', unlockAudio);
+  }).catch(() => {
+    audioUnlockInFlight = false;
+    silentAudio.pause();
+  });
+}
+document.addEventListener('click', unlockAudio);
+document.addEventListener('touchstart', unlockAudio, { passive: true });
+const amharicNumbers = [
+  '', 'አንድ', 'ሁለት', 'ሶስት', 'አራት', 'አምስት', 'ስድስት', 'ሰባት', 'ስምንት', 'ዘጠኝ',
+  'አስር', 'አስራ አንድ', 'አስራ ሁለት', 'አስራ ሶስት', 'አስራ አራት',
+  'አስራ አምስት', 'አስራ ስድስት', 'አስራ ሰባት', 'አስራ ስምንት', 'አስራ ዘጠኝ',
+];
+const amharicNumberWords = (number) => {
+  if (number < 20) return amharicNumbers[number] || String(number);
+  const tens = ['', '', 'ሃያ', 'ሰላሳ', 'አርባ', 'ሃምሳ', 'ስልሳ', 'ሰባ'];
+  const remainder = number % 10;
+  return remainder ? `${tens[Math.floor(number / 10)]} ${amharicNumbers[remainder]}` : tens[Math.floor(number / 10)];
+};
+const gameWithClockOffset = (game, requestStartedAt, responseReceivedAt = Date.now()) => game
+  ? {
+    ...game,
+    clientClockOffset: Number(game.serverNow) - (requestStartedAt + responseReceivedAt) / 2,
+  }
+  : null;
+
+function parseNumberList(value) {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed || '[]');
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map(Number).filter((number) => Number.isInteger(number) && number >= 1 && number <= 75);
+}
+
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null, componentStack: '' };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('[React Crash Caught]:', error, errorInfo);
+    this.setState({ componentStack: errorInfo.componentStack || '' });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      const { error, componentStack } = this.state;
+      return <div style={{ padding: 20, color: '#ef4444', background: '#0f0920', minHeight: '100dvh', fontFamily: 'sans-serif', overflow: 'auto' }}>
+        <h3>⚠️ {this.props.title || 'App render error'}</h3>
+        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontSize: 12, color: '#fca5a5' }}>
+          {error?.toString()}
+          {error?.stack ? `\n\n${error.stack}` : ''}
+          {componentStack ? `\n\nReact component stack:${componentStack}` : ''}
+        </pre>
+        <button onClick={() => window.location.reload()} style={{ marginTop: 15, padding: '8px 16px', background: '#f59e0b', border: 'none', borderRadius: 6, fontWeight: 'bold' }}>
+          Reload App
+        </button>
+      </div>;
+    }
+    return this.props.children;
+  }
+}
 
 const words = {
   en: {
@@ -35,6 +117,53 @@ const words = {
     support: 'Support', language: 'Language', unavailable: 'Unavailable', loading: 'Loading…',
     rules: 'One Line or Four Corners. FREE center is marked automatically.',
     roomsUnavailable: 'Could not load rooms.', dataUnavailable: 'Could not load this data.',
+    realtime: 'REAL-TIME', multipleRooms: 'MULTIPLE ROOMS', instantRewards: 'INSTANT REWARDS',
+    stakeTitle: 'Stake', stakePitch: 'Play with your stake and win big!', enterGame: 'Enter Game',
+    stakeAmount: 'STAKE AMOUNT', playersLabel: 'PLAYERS', statusLabel: 'STATUS',
+    waiting: 'WAITING', selecting: 'SELECTING', playing: 'PLAYING', playSmart: 'PLAY SMART',
+    playSmartHint: 'Choose up to 2 cartelas. Each cartela costs {amount} BIRR.',
+    howToPlay: 'HOW TO PLAY', pickRoom: 'Pick a room', chooseCards: 'Choose cards', autoMarkWin: 'Auto-mark & win',
+    round: 'ROUND', pot: 'POT', called: 'CALLED', currentBall: 'CURRENT BALL', watchingLive: 'Watching live',
+    callsSynced: 'Calls are synchronized for everyone.', auto: 'Auto', sound: 'Sound',
+    bingo: '📣 BINGO!', claimingBingo: 'Verifying…', marked: 'MARKED',
+    roomMetrics: 'Room metrics', cartelaSelection: 'Choose a cartela', selectedCartelas: 'Selected cartela previews',
+    cartela: 'Cartela', startingIn: 'STARTS IN',
+    selectPreview: 'Select up to 2 cartelas to preview', roomSummary: 'Room summary',
+    cartelaClosed: 'This room no longer accepts cartela changes.', cartelaLoadFailed: 'Could not load all 100 cartelas ({count}/100).',
+    maximumCartelas: 'Maximum 2 cartelas allowed', insufficientBalance: 'Insufficient balance.',
+    backToRooms: 'Back to rooms', roomStatus: "You're in the room",
+    waitingPlayers: 'Waiting for players to choose their cartelas. The game starts when {count} players have selected a cartela.',
+    yourCartelas: 'YOUR CARTELAS', prizePool: 'PRIZE POOL', manageCartelas: 'Manage cartelas',
+    leaveRefund: 'Leave room & refund', currentCalls: 'CURRENT BALL', recentCalls: 'RECENT',
+    gameRound: 'ROOM', playersCount: 'PLAYERS', stakeLabel: 'STAKE', freeSpace: 'Free space',
+    gameOver: 'GAME OVER', winnerHeadline: 'BINGO!', multiWinners: '{count} players won! 🎉',
+    singleWinner: 'We have a winner! 🎉', noWinner: 'The game ended without a winning cartela.',
+    winningCartela: 'WINNING CARTELA #{number}', calls: 'CALLS', verified: '✓ Verified',
+    nextRound: 'Next round in {seconds}s...', playerProfile: 'PLAYER PROFILE',
+    gamesWon: 'Games won', winnings: 'Winnings', winRate: 'Win rate', referrals: 'Referrals',
+    successfulReferrals: 'Successful referrals:',
+    availableBalance: 'Available balance', paymentMethod: 'Payment method', amountBirr: 'Amount (BIRR)',
+    transactionReference: 'Transaction reference', submitApproval: 'Submit for approval',
+    paymentUnconfigured: 'Payment methods are not configured.',
+    minWithdrawal: 'Minimum withdrawal: 50.00 BIRR. Requests reserve funds while an administrator reviews the payout.',
+    accountDetails: 'Phone/account details', room: 'Room', wins: 'wins', you: '(You)',
+    settingsTitle: 'Settings', rulesTitle: 'Rules',
+    shareAndInvite: 'Share invite', shareAction: 'Share', sharedWallet: 'SHARED WALLET',
+    youWon: 'You', historyRoom: 'Room #{id}', cartelasLabel: 'Cartelas:',
+    stakeLabelInHistory: 'Stake:', patternLabel: 'Pattern:',
+    depositOptionsMissing: 'Payment methods are not configured.',
+    noRoomsHelp: 'New rooms will appear here when opened.',
+    cartelaNumberTitle: 'Cartela #{number}', playerFallback: 'Player',
+    winnerPot: '💰 {amount} BIRR Pot', inviteCopied: 'Invite link copied.',
+    playerId: 'ID', languageEnglish: 'English', languageAmharic: 'Amharic',
+    depositSubmitted: 'Deposit request #{id} submitted; admin approval is required.',
+    withdrawalSubmitted: 'Withdrawal request #{id} submitted for admin review.',
+    shareFailed: 'Could not share the invite link.', currency: 'BIRR',
+    winnerRoom: 'ROOM #{number}', roomNumber: 'ROOM #{number}', free: 'FREE', freeSpaceLabel: 'Free space',
+    cartelaCellNumber: 'Number {number}', markedCell: 'marked',
+    roomsLoadHelp: 'New rooms will appear here when opened.',
+    claimVerified: '✓ Verified', roomStatusWaiting: 'WAITING', roomStatusSelecting: 'SELECTING',
+    roomStatusPlaying: 'PLAYING', languageSaved: 'Language updated.',
   },
   am: {
     play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
@@ -47,10 +176,58 @@ const words = {
     support: 'ድጋፍ', language: 'ቋንቋ', unavailable: 'አልተገኘም', loading: 'በመጫን ላይ…',
     rules: 'አንድ መስመር ወይም አራት ማዕዘኖች። የመሃል FREE ቦታ በራስ-ሰር ይምረጣል።',
     roomsUnavailable: 'ክፍሎችን መጫን አልተቻለም።', dataUnavailable: 'መረጃውን መጫን አልተቻለም።',
+    realtime: 'በቀጥታ', multipleRooms: 'ብዙ ክፍሎች', instantRewards: 'ፈጣን ሽልማቶች',
+    stakeTitle: 'ውርርድ', stakePitch: 'በውርርድዎ ይጫወቱና ትልቅ ያሸንፉ!', enterGame: 'ወደ ጨዋታ ግባ',
+    stakeAmount: 'የውርርድ መጠን', playersLabel: 'ተጫዋቾች', statusLabel: 'ሁኔታ',
+    waiting: 'በመጠባበቅ ላይ', selecting: 'በምርጫ ላይ', playing: 'በጨዋታ ላይ', playSmart: 'በጥበብ ይጫወቱ',
+    playSmartHint: 'እስከ 2 ካርቴላ ይምረጡ። እያንዳንዱ ካርቴላ {amount} ብር ነው።',
+    howToPlay: 'እንዴት መጫወት ይቻላል', pickRoom: 'ክፍል ይምረጡ', chooseCards: 'ካርዶችን ይምረጡ', autoMarkWin: 'በራስ-ሰር ምልክት እና አሸንፍ',
+    round: 'ዙር', pot: 'ሽልማት', called: 'የተጠሩ', currentBall: 'አሁን የወጣ ቁጥር', watchingLive: 'በቀጥታ እየተመለከቱ ነው',
+    callsSynced: 'ጥሪዎቹ ለሁሉም ተጫዋቾች ተመሳስለዋል።', auto: 'በራስ-ሰር', sound: 'ድምፅ',
+    bingo: '📣 ቢንጎ!', claimingBingo: 'በማረጋገጥ ላይ…', marked: 'ምልክት የተደረገባቸው',
+    roomMetrics: 'የክፍል መረጃ', cartelaSelection: 'ካርቴላ ይምረጡ', selectedCartelas: 'የተመረጡ ካርቴላዎች',
+    cartela: 'ካርቴላ', startingIn: 'ይጀምራል በ',
+    selectPreview: 'ለማየት እስከ 2 ካርቴላ ይምረጡ', roomSummary: 'የክፍል ማጠቃለያ',
+    cartelaClosed: 'ይህ ክፍል ካርቴላ መቀየርን አይቀበልም።', cartelaLoadFailed: '100 ካርቴላዎችን መጫን አልተቻለም ({count}/100)።',
+    maximumCartelas: 'ከፍተኛው 2 ካርቴላ ብቻ ነው።', insufficientBalance: 'በቂ ቀሪ ሂሳብ የለም።',
+    backToRooms: 'ወደ ክፍሎች ተመለስ', roomStatus: 'ወደ ክፍሉ ገብተዋል',
+    waitingPlayers: 'ተጫዋቾች ካርቴላ እስኪመርጡ ይጠብቁ። {count} ተጫዋቾች ካርቴላ ሲመርጡ ጨዋታው ይጀምራል።',
+    yourCartelas: 'የእርስዎ ካርቴላዎች', prizePool: 'ጠቅላላ ሽልማት', manageCartelas: 'ካርቴላዎችን ያስተዳድሩ',
+    leaveRefund: 'ከክፍሉ ይውጡ እና ገንዘቡን ይመልሱ', currentCalls: 'አሁን የወጣ ቁጥር', recentCalls: 'የቅርብ ጊዜ',
+    gameRound: 'ክፍል', playersCount: 'ተጫዋቾች', stakeLabel: 'ውርርድ', freeSpace: 'ነፃ ቦታ',
+    gameOver: 'ጨዋታው ተጠናቋል', winnerHeadline: 'ቢንጎ!', multiWinners: '{count} ተጫዋቾች አሸንፈዋል! 🎉',
+    singleWinner: 'አሸናፊ አለን! 🎉', noWinner: 'አሸናፊ ካርቴላ ሳይኖር ጨዋታው ተጠናቋል።',
+    winningCartela: 'አሸናፊ ካርቴላ #{number}', calls: 'ጥሪዎች', verified: '✓ ተረጋግጧል',
+    nextRound: 'ቀጣዩ ዙር በ{seconds} ሰከንድ...', playerProfile: 'የተጫዋች መገለጫ',
+    gamesWon: 'ያሸነፉ ጨዋታዎች', winnings: 'ያሸነፉት', winRate: 'የማሸነፍ መጠን', referrals: 'ግብዣዎች',
+    inviteCopied: 'የግብዣ አገናኙ ተቀድቷል።', successfulReferrals: 'የተሳኩ ግብዣዎች:',
+    availableBalance: 'ያለው ቀሪ ሂሳብ', paymentMethod: 'የክፍያ ዘዴ', amountBirr: 'መጠን (ብር)',
+    transactionReference: 'የግብይት ማጣቀሻ', submitApproval: 'ለማጽደቅ አስገባ',
+    paymentUnconfigured: 'የክፍያ ዘዴዎች አልተዋቀሩም።',
+    minWithdrawal: 'ዝቅተኛ የማውጣት መጠን፦ 50.00 ብር። አስተዳዳሪው እስኪገመግም ገንዘቡ ይያዛል።',
+    accountDetails: 'ስልክ/የሂሳብ ዝርዝር', room: 'ክፍል', wins: 'አሸንፈዋል', you: '(እርስዎ)',
+    settingsTitle: 'ቅንብሮች', rulesTitle: 'ህጎች',
+    shareAndInvite: 'ግብዣ አጋራ', shareAction: 'አጋራ', sharedWallet: 'የጋራ ቦርሳ',
+    youWon: 'እርስዎ', historyRoom: 'ክፍል #{id}', cartelasLabel: 'ካርቴላዎች:',
+    stakeLabelInHistory: 'ውርርድ:', patternLabel: 'ቅርጽ:',
+    depositOptionsMissing: 'የክፍያ ዘዴዎች አልተዋቀሩም።',
+    noRoomsHelp: 'አዳዲስ ክፍሎች ሲከፈቱ እዚህ ይታያሉ።',
+    cartelaNumberTitle: 'ካርቴላ #{number}', playerFallback: 'ተጫዋች',
+    winnerPot: '💰 {amount} ብር ሽልማት',
+    playerId: 'መለያ', languageEnglish: 'እንግሊዝኛ', languageAmharic: 'አማርኛ',
+    depositSubmitted: 'የተቀማጭ ጥያቄ #{id} ተልኳል፤ የአስተዳዳሪ ማጽደቅ ያስፈልጋል።',
+    withdrawalSubmitted: 'የማውጣት ጥያቄ #{id} ለአስተዳዳሪ ግምገማ ተልኳል።',
+    shareFailed: 'የግብዣ አገናኙን ማጋራት አልተቻለም።', currency: 'ብር',
+    winnerRoom: 'ክፍል #{number}', roomNumber: 'ክፍል #{number}', free: 'ነፃ', freeSpaceLabel: 'ነፃ ቦታ',
+    cartelaCellNumber: 'ቁጥር {number}', markedCell: 'ምልክት የተደረገ',
+    noRoomsTitle: 'አሁን የሚጠባበቅ ክፍል የለም።',
+    roomsLoadHelp: 'አዳዲስ ክፍሎች ሲከፈቱ እዚህ ይታያሉ።', refreshRoom: 'ክፍሉን አድስ',
+    claimVerified: '✓ ተረጋግጧል', roomStatusWaiting: 'በመጠባበቅ ላይ',
+    roomStatusSelecting: 'በምርጫ ላይ', roomStatusPlaying: 'በጨዋታ ላይ', languageSaved: 'ቋንቋው ተቀይሯል።',
   },
 };
 
-async function api(path, { method = 'GET', body, initData, allowAnonymous = false } = {}) {
+async function api(path, { method = 'GET', body, initData, allowAnonymous = false, signal } = {}) {
   if (!initData && !allowAnonymous) throw new Error('Open this Mini App from Telegram to authenticate.');
   const response = await fetch(path, {
     method,
@@ -59,6 +236,7 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
       ...(body ? { 'content-type': 'application/json' } : {}),
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
+    ...(signal ? { signal } : {}),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -89,9 +267,8 @@ function App() {
   const t = words[lang];
   const [user, setUser] = useState(null);
   const [wallet, setWallet] = useState(null);
-  const [walletLoading, setWalletLoading] = useState(true);
-  const [walletError, setWalletError] = useState('');
   const [rooms, setRooms] = useState([]);
+  const [myRoomId, setMyRoomId] = useState(null);
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
@@ -100,6 +277,7 @@ function App() {
   const selectionMutationQueue = useRef(Promise.resolve());
   const activeSelectionMutations = useRef(0);
   const [game, setGame] = useState(null);
+  const lastGameCall = useRef({ roomId: null, number: null });
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
   const [ranks, setRanks] = useState([]);
@@ -113,18 +291,14 @@ function App() {
 
   const request = useCallback((path, options) => api(path, { ...options, initData }), [initData]);
   const refreshWallet = useCallback(async () => {
-    setWalletLoading(true);
     try {
       const data = await request('/api/me');
       setUser(data.user);
       setWallet(data.wallet.balance);
       setLang(data.user.language === 'am' ? 'am' : 'en');
-      setWalletError('');
     } catch (reason) {
-      setWalletError(reason.message);
+      console.warn('[Balance refresh skipped]:', reason);
       throw reason;
-    } finally {
-      setWalletLoading(false);
     }
   }, [request]);
 
@@ -133,22 +307,23 @@ function App() {
     try {
       const data = await api('/api/rooms', { initData, allowAnonymous: true });
       setRooms(data.rooms);
+      setMyRoomId(data.myRoom ? String(data.myRoom) : null);
       return data;
     } finally {
       setRoomsLoading(false);
     }
   }, [initData]);
 
-  const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current) => {
-    const data = await request(`/api/rooms/${encodeURIComponent(id)}`);
+  const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current, signal) => {
+    const requestStartedAt = Date.now();
+    const data = await request(`/api/rooms/${encodeURIComponent(id)}/state`, { signal });
     if (sessionRevision !== roomSessionRevision.current) return data;
     setRoom(withRoomClock(data.room));
-    setGame(data.game || null);
+    setGame(gameWithClockOffset(data.game, requestStartedAt));
     if (data.wallet?.availableBalance !== undefined) {
       setWallet(data.wallet.availableBalance);
-      setWalletError('');
     }
-    setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
+    setView(['PLAYING', 'VERIFYING'].includes(data.room.status) ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
     return data;
   }, [request]);
 
@@ -171,7 +346,6 @@ function App() {
       if (attempts >= 20) {
         if (active) {
           setTelegramChecked(true);
-          setWalletLoading(false);
           setTelegramDiagnostic(telegram
             ? `Telegram SDK detected (${telegram.platform || 'platform unknown'}, version ${telegram.version || 'unknown'}), but no launch data was provided. Close this window and reopen the Mini App from the bot menu.`
             : 'Telegram WebApp SDK was not detected. Open this Mini App from the bot menu inside Telegram.');
@@ -226,10 +400,46 @@ function App() {
   useEffect(() => {
     if (view !== 'play') return undefined;
     const timer = window.setInterval(() => {
-      refreshRooms().catch((reason) => setError(reason.message));
-    }, 8000);
+      refreshRooms().catch((reason) => console.warn('[Lobby polling tick skipped]:', reason));
+    }, 3000);
     return () => window.clearInterval(timer);
   }, [initData, view, refreshRooms]);
+
+  useEffect(() => {
+    if (view !== 'cartelas' || !room?.id || !initData) return undefined;
+    let active = true;
+    let inFlight = false;
+    const syncCartelas = async () => {
+      if (inFlight || document.visibilityState !== 'visible') return;
+      inFlight = true;
+      try {
+        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`);
+        if (!active || !Array.isArray(data.cartelas)) return;
+        const states = new Map(data.cartelas.map((card) => [Number(card.number), card.state]));
+        setRoom((current) => {
+          if (!current || String(current.id) !== String(room.id)) return current;
+          let changed = false;
+          const cartelas = current.cartelas.map((card) => {
+            const state = states.get(Number(card.number));
+            if (!state || state === card.state) return card;
+            changed = true;
+            return { ...card, state };
+          });
+          return changed ? { ...current, cartelas } : current;
+        });
+      } catch (reason) {
+        if (active) console.warn('[Cartela sync tick skipped]:', reason);
+      } finally {
+        inFlight = false;
+      }
+    };
+    syncCartelas();
+    const timer = window.setInterval(syncCartelas, 350);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [view, room?.id, initData, request]);
 
   useEffect(() => {
     if (!initData) return undefined;
@@ -253,20 +463,29 @@ function App() {
     let active = true;
     const update = async () => {
       const revision = roomStateRevision.current;
+      const requestStartedAt = Date.now();
       try {
-        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}`);
+        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/state`);
+        const responseReceivedAt = Date.now();
         if (!active || revision !== roomStateRevision.current) return;
+        const currentNumber = data.game?.currentNumber ?? null;
+        if (lastGameCall.current.roomId === room.id
+          && currentNumber !== null && lastGameCall.current.number !== null
+          && currentNumber !== lastGameCall.current.number) {
+          telegramWebApp()?.HapticFeedback?.impactOccurred?.('medium');
+        }
+        lastGameCall.current = { roomId: room.id, number: currentNumber };
         setRoom(withRoomClock(data.room));
-        setGame(data.game || null);
+        setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
-        if (data.room.status === 'PLAYING') setView('game');
+        if (['PLAYING', 'VERIFYING'].includes(data.room.status)) setView('game');
         if (data.room.status === 'FINISHED') setView('winner');
       } catch (reason) {
-        if (active) setError(reason.message);
+        if (active) console.warn('[Polling tick skipped]:', reason);
       }
     };
     update();
-    const timer = window.setInterval(update, 3000);
+    const timer = window.setInterval(update, 1500);
     return () => { active = false; window.clearInterval(timer); };
   }, [room?.id, view, request]);
 
@@ -310,19 +529,18 @@ function App() {
     roomStateRevision.current += 1;
     setRoom(null);
     setGame(null);
-    setWallet(null);
     setView('play');
-    Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => setError(reason.message));
+    Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => console.warn('[Lobby refresh skipped]:', reason));
   }
 
-  function resetRoomState() {
+  function resetRoomState({ keepCurrentView = false } = {}) {
     roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
-    setRoom(null);
-    setGame(null);
-    setWallet(null);
-    setWalletError('');
-    setView('play');
+    if (!keepCurrentView) {
+      setRoom(null);
+      setGame(null);
+    }
+    if (!keepCurrentView) setView('play');
     return roomSessionRevision.current;
   }
 
@@ -344,33 +562,43 @@ function App() {
     setError(diagnostic);
   }
 
-  async function enterRoom(item) {
+  async function enterRoom(item, { keepCurrentView = false } = {}) {
     if (!initData) {
       setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
       return;
     }
-    const sessionRevision = resetRoomState();
+    const sessionRevision = resetRoomState({ keepCurrentView });
     setBusy(true);
     try {
+      const requestStartedAt = Date.now();
       const [data, me] = await Promise.all([
         request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} }),
         request('/api/me'),
       ]);
+      const responseReceivedAt = Date.now();
       if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
       setRoom(withRoomClock(data.room));
-      setGame(data.game || null);
+      setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
       setWallet(me.wallet.availableBalance ?? me.wallet.balance ?? data.wallet.availableBalance);
-      setWalletError('');
-      setView(data.room.status === 'PLAYING' ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
+      if (!data.spectator && data.room.status !== 'FINISHED') setMyRoomId(String(data.room.id));
+      const hasCartelas = Array.isArray(data.room.cartelas)
+        && data.room.cartelas.some((card) => card.state === 'MINE');
+      if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
+        setView('game');
+        if (!hasCartelas) console.info('[Room entry]: joining live game in spectator mode.');
+      } else {
+        setView(data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
+      }
       setError('');
     } catch (reason) {
       try {
         await refreshRooms();
-        setError(reason.message);
       } catch (refreshError) {
-        setError(`${reason.message} Room refresh failed: ${refreshError.message}`);
+        console.warn('[Room entry and room refresh failed]:', reason, refreshError);
       }
+      console.warn('[Room entry failed]:', reason);
+      if (keepCurrentView) setView('play');
     } finally {
       setBusy(false);
     }
@@ -387,6 +615,7 @@ function App() {
     const operation = selectionMutationQueue.current.then(async () => {
       if (sessionRevision !== roomSessionRevision.current) throw new Error('Room changed before the selection was saved.');
       roomStateRevision.current += 1;
+      const requestStartedAt = Date.now();
       const data = await request(`/api/rooms/${encodeURIComponent(roomId)}/cartela`, {
         method: 'POST',
         body: { cartelaNumber: card.number, action },
@@ -395,9 +624,8 @@ function App() {
         roomStateRevision.current += 1;
         setRoom(withRoomClock(data.room));
         setWallet(data.wallet.availableBalance);
-        setWalletError('');
-        if (data.room.status === 'PLAYING') {
-          setGame(data.game || null);
+        if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
+          setGame(gameWithClockOffset(data.game, requestStartedAt));
           setView('game');
         }
       }
@@ -412,12 +640,12 @@ function App() {
         try {
           await loadRoom(roomId, sessionRevision);
         } catch (refreshError) {
-          setError(`${message} Room refresh failed: ${refreshError.message}`);
+          console.warn('[Cartela rollback room refresh failed]:', message, refreshError);
         }
         try {
           await refreshWallet();
         } catch (refreshError) {
-          setError(`${message} Wallet refresh failed: ${refreshError.message}`);
+          console.warn('[Cartela rollback balance refresh failed]:', message, refreshError);
         }
       }
       throw reason;
@@ -429,6 +657,10 @@ function App() {
 
   async function leaveRoom() {
     if (!room || busy) return;
+    if (room.status !== 'WAITING') {
+      returnToLobby();
+      return;
+    }
     setBusy(true);
     try {
       await request(`/api/rooms/${encodeURIComponent(room.id)}/leave`, { method: 'POST', body: {} });
@@ -436,23 +668,47 @@ function App() {
       roomStateRevision.current += 1;
       setRoom(null);
       setGame(null);
-      setWallet(null);
       setView('play');
       await Promise.all([refreshWallet(), refreshRooms()]);
     } catch (reason) {
-      setError(reason.message);
+      console.warn('[Room leave failed]:', reason);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function advanceToNextRound() {
+    roomSessionRevision.current += 1;
+    roomStateRevision.current += 1;
+    try {
+      const data = await refreshRooms();
+      refreshWallet().catch((reason) => console.warn('[Next-round balance refresh skipped]:', reason));
+      const nextRoom = data.rooms.find((item) => item.status === 'WAITING');
+      if (nextRoom) await enterRoom(nextRoom, { keepCurrentView: true });
+      else setView('play');
+    } catch (reason) {
+      console.warn('[Next room lookup failed]:', reason);
+      setView('play');
     }
   }
 
   async function saveLanguage(value) {
+    const previousLanguage = lang;
     setBusy(true);
+    setLang(value);
+    setUser((current) => current ? { ...current, language: value } : current);
+    setProfile((current) => current
+      ? { ...current, user: { ...current.user, language: value } }
+      : current);
     try {
       await request('/api/language', { method: 'POST', body: { language: value } });
-      setLang(value);
       setError('');
     } catch (reason) {
+      setLang(previousLanguage);
+      setUser((current) => current ? { ...current, language: previousLanguage } : current);
+      setProfile((current) => current
+        ? { ...current, user: { ...current.user, language: previousLanguage } }
+        : current);
       setError(reason.message);
     } finally {
       setBusy(false);
@@ -460,44 +716,59 @@ function App() {
 
   }
 
-  const gameNumbers = game?.calledNumbers || [];
-  const calledSet = useMemo(() => new Set(gameNumbers.map(Number)), [gameNumbers]);
-  const alertMessage = [error, walletError].filter(Boolean).join(' ');
-
-  return <div className={`app-shell ${view === 'cartelas' ? 'cartela-app-shell' : ''}`}>
-    {view !== 'cartelas' && <header className="topbar">
+  const gameNumbers = useMemo(() => parseNumberList(game?.calledNumbers), [game?.calledNumbers]);
+  const calledSet = useMemo(() => new Set(gameNumbers), [gameNumbers]);
+  return <div className={`app-shell ${view === 'cartelas' ? 'cartela-app-shell' : ''} ${view === 'game' ? 'game-app-shell' : ''} ${view === 'winner' ? 'winner-app-shell' : ''}`}>
+    {!['cartelas', 'game', 'winner'].includes(view) && <header className="topbar">
       <div className="brand-mark">
         <span className="brand-icon" aria-hidden="true">👑</span>
-        <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? 'Player' : t.loading)}</small></span>
+        <span className="brand-copy"><b>SHISHO BINGO</b><small>{user?.firstName || (telegramChecked ? t.playerFallback : t.loading)}</small></span>
       </div>
       <button className="wallet-chip" onClick={() => go('wallet')} aria-label={t.balance}>
-        <span aria-hidden="true">💰</span> {walletLoading ? '…' : wallet === null ? '—' : money(wallet)} <small>BIRR</small>
+        <span aria-hidden="true">💰</span> {wallet === null ? '—' : money(wallet)} <small>{t.currency}</small>
       </button>
     </header>}
 
-    {alertMessage && view !== 'cartelas' && <div className="alert" role="alert"><span>{alertMessage}</span>
-      {alertMessage.toLowerCase().includes('insufficient balance') && <button onClick={() => go('wallet')}>{t.deposit}</button>}
-      <button onClick={() => {
-        if (!initData) {
-          retryTelegramAuthentication();
-          return;
-        }
-        setError('');
-        Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => setError(reason.message));
-      }}>{t.retry}</button>
-    </div>}
-
     <main className="content">
-      {view === 'play' && <PlayScreen t={t} rooms={rooms} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
+      {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
       {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
-      {view === 'game' && room && <GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (number) => {
+      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (numbers) => {
         setBusy(true);
-        try { await request(`/api/rooms/${room.id}/bingo`, { method: 'POST', body: { cartelaNumber: number } }); await loadRoom(room.id); }
-        catch (reason) { setError(reason.message); }
-        finally { setBusy(false); }
-      }} />}
-      {view === 'winner' && <WinnerScreen game={game} room={room} t={t} onBack={() => go('play')} />}
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 10000);
+        try {
+          if (!numbers.length) throw new Error('No winning cartela is available to claim.');
+          const result = await request(`/api/rooms/${room.id}/bingo`, {
+            method: 'POST',
+            body: {},
+            signal: controller.signal,
+          });
+          if (result.success !== true || result.accepted !== true) {
+            throw new Error(result.error || 'Bingo claim was not accepted.');
+          }
+          setRoom((current) => current && String(current.id) === String(room.id)
+            ? { ...current, status: result.status || 'VERIFYING' }
+            : current);
+        } catch (reason) {
+          console.warn('[Bingo claim failed]:', reason);
+          const refreshController = new AbortController();
+          const refreshTimeout = window.setTimeout(() => refreshController.abort(), 2500);
+          try {
+            const latest = await loadRoom(room.id, roomSessionRevision.current, refreshController.signal);
+            if (['VERIFYING', 'FINISHED'].includes(latest.room.status)) return;
+          } catch (refreshError) {
+            console.warn('[Bingo claim state refresh failed]:', refreshError);
+          } finally {
+            window.clearTimeout(refreshTimeout);
+          }
+          throw reason;
+        } finally {
+          window.clearTimeout(timeout);
+          setBusy(false);
+        }
+      }} /></ErrorBoundary>}
+      {view === 'winner' && <WinnerScreen game={game} room={room} t={t} onNextRound={advanceToNextRound} />}
       {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
       {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
@@ -515,45 +786,56 @@ function App() {
   </div>;
 }
 
-function PlayScreen({ t, rooms, roomsLoading, onJoin, busy, onRefresh }) {
+function PlayScreen({ t, rooms, myRoomId, roomsLoading, onJoin, busy, onRefresh }) {
+  const activeRoom = rooms.find((room) => String(room.id) === String(myRoomId))
+    || rooms.find((room) => room.status === 'WAITING')
+    || rooms.find((room) => ['PLAYING', 'VERIFYING'].includes(room.status));
   return <div className="play-screen">
     <section className="hero">
       <div className="hero-crown" aria-hidden="true">👑</div>
       <h1>SHISHO <b>BINGO</b></h1>
       <p>{t.welcome}</p>
       <div className="features">
-        <span>🏆 REAL-TIME</span><span>🎟️ MULTIPLE ROOMS</span><span>💰 INSTANT REWARDS</span>
+        <span>🏆 {t.realtime}</span><span>🎟️ {t.multipleRooms}</span><span>💰 {t.instantRewards}</span>
       </div>
     </section>
     <section className="section-heading"><h2 className="eyebrow">{t.rooms}</h2></section>
     {roomsLoading && rooms.length === 0
       ? <div className="empty panel" role="status"><span className="empty-icon">🎱</span><strong>{t.loading}</strong></div>
-      : rooms.length === 0
-      ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>New rooms will appear here when opened.</p><button className="outline-button" onClick={onRefresh}>↻ {t.retry}</button></div>
-      : <div className="room-list">{rooms.map((room) => <article className="room-card panel" key={room.id}>
-        <div className="room-title">
-          <span className="room-emblem" aria-hidden="true">⑧</span>
-          <div className="room-description"><h3>Room #{room.roomNumber || room.id}</h3><small>75-Ball Classic · Max {room.maxPlayers} Players</small></div>
-          <button className="join-button" disabled={busy || room.status !== 'WAITING' || room.currentPlayers >= room.maxPlayers} onClick={() => onJoin(room)}>
-            {busy ? t.loading : 'JOIN +'}
-          </button>
-        </div>
-        <div className="room-stats">
-          <div><b>{money(room.prizePool)}</b><small>POT BIRR</small></div>
-          <div><b>{room.currentPlayers}/{room.maxPlayers}</b><small>PLAYERS</small></div>
-          <div><b>{room.status}</b><small>STATUS</small></div>
-        </div>
-      </article>)}</div>}
-    <section className="play-smart panel">
-      <div><h2>🎁 PLAY SMART</h2><p>Choose up to 2 cartelas. Each cartela costs 10 BIRR.</p></div>
-      <span aria-hidden="true">🎟️</span>
-    </section>
+      : !activeRoom
+      ? <div className="empty panel"><span className="empty-icon">🎱</span><strong>{t.roomEmpty}</strong><p>{t.noRoomsHelp}</p><button className="outline-button" onClick={onRefresh}>↻ {t.retry}</button></div>
+      : <div className="room-list">{[activeRoom].map((room) => {
+        const status = ['PLAYING', 'VERIFYING'].includes(room.status)
+          ? 'PLAYING'
+          : Number(room.selectedCartelas || 0) > 0 ? 'SELECTING' : 'WAITING';
+        return <article className="room-card panel stake-entry-card" key={room.id}>
+          <div className="room-title stake-header-row">
+            <span className="room-emblem stake-icon-badge" aria-hidden="true">💰</span>
+            <div className="room-description stake-info-text">
+              <h3>{t.stakeTitle} <span>{money(room.stake).replace(/\.00$/, '')} {t.currency}</span></h3>
+              <small>{t.stakePitch}</small>
+            </div>
+            <button className="join-button btn-enter-game" disabled={busy || (room.status === 'WAITING' && room.currentPlayers >= room.maxPlayers)} onClick={() => onJoin(room)}>
+              <span aria-hidden="true">▶</span> {busy ? t.loading : t.enterGame}
+            </button>
+          </div>
+          <div className="room-stats stake-metrics-row">
+            <div className="metric-box"><b className="metric-value">💰 {money(room.stake)}</b><small className="metric-label">{t.stakeAmount}</small></div>
+            <div className="metric-box"><b className="metric-value">👥 {room.currentPlayers}/{room.maxPlayers}</b><small className="metric-label">{t.playersLabel}</small></div>
+            <div className="metric-box"><b className={`metric-value room-status-${status.toLowerCase()}`}>{status === 'PLAYING' ? '🎱' : '⌛'} {t[`roomStatus${status[0]}${status.slice(1).toLowerCase()}`]}</b><small className="metric-label">{t.statusLabel}</small></div>
+          </div>
+          <section className="play-smart play-smart-pill">
+            <div><h2>🎁 {t.playSmart}</h2><p>{t.playSmartHint.replace('{amount}', money(room.stake).replace(/\.00$/, ''))}</p></div>
+            <span aria-hidden="true">🎟️</span>
+          </section>
+        </article>;
+      })}</div>}
     <section className="how-to">
-      <h2 className="eyebrow">HOW TO PLAY</h2>
+      <h2 className="eyebrow">{t.howToPlay}</h2>
       <div className="how-to-card panel">
-        <div><b>1</b><span>Pick a room</span></div>
-        <div><b>2</b><span>Choose cards</span></div>
-        <div><b>3</b><span>Auto-mark &amp; win</span></div>
+        <div><b>1</b><span>{t.pickRoom}</span></div>
+        <div><b>2</b><span>{t.chooseCards}</span></div>
+        <div><b>3</b><span>{t.autoMarkWin}</span></div>
       </div>
     </section>
   </div>;
@@ -634,11 +916,11 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
     const action = card.state === 'MINE' ? 'deselect' : 'select';
     const selectedCount = cards.filter((item) => item.state === 'MINE').length;
     if (action === 'select' && selectedCount >= MAX_CARTELAS_PER_PLAYER) {
-      showNotice('Maximum 2 cartelas allowed');
+      showNotice(t.maximumCartelas);
       return;
     }
     if (action === 'select' && (displayBalance === null || multiplyMoney(displayBalance, 1) < stakeMinorUnits)) {
-      showNotice('Insufficient balance.');
+      showNotice(t.insufficientBalance);
       return;
     }
 
@@ -671,61 +953,64 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
       });
       setOverrides((current) => {
         if (current[card.number]?.pendingId !== id) return current;
+        if (action === 'select' && (error.code === 'CARTELA_TAKEN' || /already been taken/i.test(error.message))) {
+          return { ...current, [card.number]: { state: 'TAKEN', pendingId: null } };
+        }
         const next = { ...current };
         delete next[card.number];
         return next;
       });
-      showNotice(error.message || 'Selection failed. Please try again.');
+      console.warn('[Cartela toggle failed, optimistic selection rolled back]:', error);
     }
   }
 
   return <div className="cartela-screen">
     <header className="cartela-screen-header">
-      <button className="cartela-back" disabled={busy} onClick={onBack}>← Back</button>
+      <button className="cartela-back" disabled={busy} onClick={onBack}>← {t.back}</button>
       <div className="cartela-brand-title"><strong>SHISHO BINGO</strong><small>ሺሾ ቢንጎ</small></div>
       <span aria-hidden="true" />
     </header>
-    <section className="cartela-hud" aria-label="Room metrics">
-      <div className="cartela-hud-card"><small>BALANCE</small><b>{displayBalance === null ? t.unavailable : displayBalance}</b></div>
-      <div className="cartela-hud-card"><small>COST</small><b>{stakeLabel}</b></div>
-      <div className="cartela-hud-card pot"><small>POT</small><b>{displayPot.replace(/\.00$/, '')}</b></div>
-      <div className="cartela-hud-card starts-in"><small>STARTS IN</small><b>{timerLabel}</b></div>
+    <section className="cartela-hud" aria-label={t.roomMetrics}>
+      <div className="cartela-hud-card"><small>{t.balance.toUpperCase()}</small><b>{displayBalance === null ? t.unavailable : displayBalance}</b></div>
+      <div className="cartela-hud-card"><small>{t.stakeLabel}</small><b>{stakeLabel}</b></div>
+      <div className="cartela-hud-card pot"><small>{t.pot}</small><b>{displayPot.replace(/\.00$/, '')}</b></div>
+      <div className="cartela-hud-card starts-in"><small>{t.startingIn}</small><b>{timerLabel}</b></div>
     </section>
-    {!waiting && <p className="cartela-closed-note" role="status">This room no longer accepts cartela changes.</p>}
+    {!waiting && <p className="cartela-closed-note" role="status">{t.cartelaClosed}</p>}
     {cards.length !== 100
-      ? <div className="cartela-load-error" role="alert">Could not load all 100 cartelas ({cards.length}/100).</div>
-      : <div className="cartela-grid-8col" aria-label="Choose a cartela">
+      ? <div className="cartela-load-error" role="alert">{t.cartelaLoadFailed.replace('{count}', cards.length)}</div>
+      : <div className="cartela-grid-8col" aria-label={t.cartelaSelection}>
         {cards.map((card) => <button
           key={`${room.id}-${card.number}`}
-          className={`cartela-btn ${card.state === 'MINE' ? 'mine' : card.state === 'TAKEN' ? 'taken' : ''}`}
+          className={`cartela-btn ${card.state === 'MINE' ? 'mine' : card.state === 'TAKEN' ? 'taken' : 'available'}`}
           disabled={card.state === 'TAKEN' || !waiting || Boolean(overrides[card.number]?.pendingId)}
-          aria-label={`Cartela ${card.number}: ${card.state === 'MINE' ? 'selected, tap to deselect' : card.state === 'TAKEN' ? 'taken' : 'available, tap to select'}`}
+          aria-label={`${t.cartela} ${card.number}: ${card.state === 'MINE' ? t.selected : card.state === 'TAKEN' ? t.taken : t.available}`}
           onClick={() => chooseCartela(card)}
         >{card.number}</button>)}
       </div>}
-    <section className="cartela-previews" aria-label="Selected cartela previews">
+    <section className="cartela-previews" aria-label={t.selectedCartelas}>
       {mine.length
         ? mine.map((card) => <article className="cartela-preview-card" key={card.number}>
-          <h2>Cartela #{card.number}</h2>
+          <h2>{t.cartelaNumberTitle.replace('{number}', card.number)}</h2>
           <div className="cartela-preview-board">
             {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="cartela-preview-column" key={letter}>
               <b>{letter}</b>
               {[0, 1, 2, 3, 4].map((row) => {
                 const value = card.numbers?.[row * 5 + column];
-                return <span className={value === 'FREE' ? 'free' : ''} key={`${row}-${column}`}>{value ?? '—'}</span>;
+                return <span className={value === 'FREE' ? 'free' : ''} key={`${row}-${column}`}>{value === 'FREE' ? t.free : value ?? '—'}</span>;
               })}
             </div>)}
           </div>
         </article>)
-        : <p className="cartela-preview-placeholder">Select up to 2 cartelas to preview</p>}
+        : <p className="cartela-preview-placeholder">{t.selectPreview}</p>}
     </section>
-    <aside className="cartela-bottom-hud" aria-label="Room summary">
+    <aside className="cartela-bottom-hud" aria-label={t.roomSummary}>
       <div className="cartela-bottom-counts">
         <span>☑ {mine.length}/{MAX_CARTELAS_PER_PLAYER}</span>
         <span>▦ {availableCartelas}/100</span>
         <span>👤 {room.currentPlayers}</span>
       </div>
-      <button className="cartela-leave-button" disabled={busy || !waiting} onClick={onLeave}>← LEAVE ROOM</button>
+      <button className="cartela-leave-button" disabled={busy || !waiting} onClick={onLeave}>← {t.leave.toUpperCase()}</button>
     </aside>
     {notice && <div className="cartela-toast" role="status">{notice}</div>}
   </div>;
@@ -734,65 +1019,353 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
 function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh }) {
   const selected = room.cartelas.filter((card) => card.state === 'MINE');
   return <>
-    <button className="text-button" onClick={onBack}>← Back to rooms</button>
+    <button className="text-button" onClick={onBack}>← {t.backToRooms}</button>
     <section className="waiting-room panel">
       <div className="waiting-crown">👑</div>
-      <div className="eyebrow">ROOM #{room.roomNumber || room.id}</div>
-      <h1>You're in the room</h1>
-      <span className="status status-waiting">{room.status}</span>
-      <p>Waiting for players to choose their cartelas. The game starts when {room.minPlayers} players have selected a cartela.</p>
+      <div className="eyebrow">{t.roomNumber.replace('{number}', room.roomNumber || room.id)}</div>
+      <h1>{t.roomStatus}</h1>
+      <span className="status status-waiting">{t[['PLAYING', 'VERIFYING'].includes(room.status) ? 'playing' : 'waiting']}</span>
+      <p>{t.waitingPlayers.replace('{count}', room.minPlayers)}</p>
       <div className="room-info-grid">
-        <div><small>PLAYERS</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
-        <div><small>YOUR CARTELAS</small><b>{selected.map((card) => `#${card.number}`).join(', ') || '—'}</b></div>
-        <div><small>PRIZE POOL</small><b>{money(room.prizePool)} BIRR</b></div>
+        <div><small>{t.playersLabel}</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
+        <div><small>{t.yourCartelas}</small><b>{selected.map((card) => `#${card.number}`).join(', ') || '—'}</b></div>
+        <div><small>{t.prizePool}</small><b>{money(room.prizePool)} {t.currency}</b></div>
       </div>
-      <button className="primary-button" disabled={busy} onClick={onRefresh}>↻ Refresh room</button>
-      <button className="outline-button" disabled={busy} onClick={onManage}>Manage cartelas</button>
-      <button className="danger-button" disabled={busy} onClick={onLeave}>Leave room &amp; refund</button>
+      <button className="primary-button" disabled={busy} onClick={onRefresh}>↻ {t.refreshRoom}</button>
+      <button className="outline-button" disabled={busy} onClick={onManage}>{t.manageCartelas}</button>
+      <button className="danger-button" disabled={busy} onClick={onLeave}>{t.leaveRefund}</button>
     </section>
   </>;
 }
 
 function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBingo }) {
-  const [selected, setSelected] = useState(0);
-  const myCards = room.cartelas?.filter((card) => card.state === 'MINE') || [];
-  const activeCard = myCards[selected];
-  const recent = (game?.calledNumbers || []).slice(-5).reverse();
-  const columns = [1, 16, 31, 46, 61];
-  return <>
-    <section className="game-head">
-      <div><div className="eyebrow">SHISHO BINGO · ROOM #{room.roomNumber || room.id}</div><h2>{t.game}</h2></div>
-      <span className="status status-playing">{room.status}</span>
+  const [autoMark, setAutoMark] = useState(true);
+  const [isClaiming, setIsClaiming] = useState(false);
+  const claimInFlight = useRef(false);
+  const [soundEnabled, setSoundEnabled] = useState(() => {
+    try { return window.localStorage.getItem('shisho_sound') !== 'false'; }
+    catch { return true; }
+  });
+  const [clockTick, setClockTick] = useState(Date.now());
+  const [manualMarks, setManualMarks] = useState({});
+  const [invalidCells, setInvalidCells] = useState({});
+  const [claimPaused, setClaimPaused] = useState(false);
+  const myCards = (Array.isArray(room?.cartelas) ? room.cartelas : [])
+    .filter((card) => card && card.state === 'MINE');
+  const syncRef = useRef({ offset: 0 });
+  const activeAudioRef = useRef(null);
+  const audioUnlockedRef = useRef(false);
+  useEffect(() => {
+    const audio = new Audio();
+    audio.preload = 'auto';
+    activeAudioRef.current = audio;
+    return () => {
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+      if (activeAudioRef.current === audio) activeAudioRef.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const unlockAudio = () => {
+      const audio = activeAudioRef.current;
+      if (audioUnlockedRef.current || !audio) return;
+      audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+      audio.play().then(() => {
+        audioUnlockedRef.current = true;
+        audio.pause();
+        audio.currentTime = 0;
+        audio.removeAttribute('src');
+        audio.load();
+        window.removeEventListener('touchstart', unlockAudio);
+        window.removeEventListener('click', unlockAudio);
+      }).catch((error) => {
+        console.warn('[Audio unlock failed]:', error.message);
+      });
+    };
+    window.addEventListener('touchstart', unlockAudio, { passive: true });
+    window.addEventListener('click', unlockAudio);
+    return () => {
+      window.removeEventListener('touchstart', unlockAudio);
+      window.removeEventListener('click', unlockAudio);
+    };
+  }, []);
+  useEffect(() => {
+    if (game?.serverNow && game?.startedAt) {
+      syncRef.current.offset = Number(game.clientClockOffset ?? (Number(game.serverNow) - Date.now()));
+    }
+  }, [game?.serverNow, game?.startedAt, game?.clientClockOffset]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockTick(Date.now()), 50);
+    return () => window.clearInterval(timer);
+  }, []);
+  const calledNumbers = parseNumberList(game?.calledNumbers);
+  const serverCalledSet = useMemo(() => new Set(calledNumbers), [calledNumbers]);
+  const rawDrawOrder = game?.drawOrder ?? game?.draw_order ?? room?.draw_order;
+  const drawOrder = parseNumberList(rawDrawOrder);
+  const intervalMs = Number(game?.callIntervalMs || Number(game?.callIntervalSeconds || 4) * 1000);
+  const startedAtValue = game?.startedAt ?? game?.started_at ?? room?.startedAt ?? room?.started_at;
+  const startedAt = startedAtValue == null ? null : Number(startedAtValue);
+  const scheduleIsValid = startedAt !== null && Number.isFinite(startedAt)
+    && Number.isFinite(intervalMs) && intervalMs > 0 && drawOrder.length > 0;
+  const scheduledCount = scheduleIsValid
+    ? Math.min(drawOrder.length, Math.floor(Math.max(0, clockTick + syncRef.current.offset - startedAt) / intervalMs))
+    : 0;
+  const callsAreFrozen = room?.status === 'VERIFYING' || claimPaused || isClaiming;
+  const displayedNumbers = callsAreFrozen
+    ? calledNumbers
+    : drawOrder.length
+    ? drawOrder.slice(0, Math.min(drawOrder.length, Math.max(calledNumbers.length, scheduledCount)))
+    : calledNumbers;
+  const displayedCalledSet = useMemo(() => new Set(displayedNumbers.map(Number)), [displayedNumbers]);
+  const recent = displayedNumbers.slice(-2).reverse();
+  const currentNumber = displayedNumbers.at(-1) ?? parseNumberList([game?.currentNumber])[0] ?? null;
+  const previousNumber = recent[1] ?? null;
+  const markedNumbersFor = (card) => autoMark
+    ? displayedCalledSet
+    : new Set(manualMarks[card.number] || []);
+  const claimableCards = myCards.filter((card) => winningPatternForCard(card.numbers, serverCalledSet));
+  const isSpectator = !myCards.length;
+  const previousCall = useRef(null);
+  useEffect(() => {
+    if (!soundEnabled || currentNumber === null || callsAreFrozen || previousCall.current === currentNumber) {
+      previousCall.current = currentNumber;
+      return undefined;
+    }
+    let active = true;
+    let speechFallbackStarted = false;
+    const speakFallback = () => {
+      if (!active || !soundEnabled || speechFallbackStarted) return;
+      speechFallbackStarted = true;
+      try {
+        if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+          console.warn('Speech synthesis is unavailable on this device.');
+          return;
+        }
+        const voices = window.speechSynthesis.getVoices();
+        if (!voices.length) {
+          console.warn('No speech synthesis voices are available.');
+          return;
+        }
+        if (!voices.some((voice) => voice.lang.toLowerCase().startsWith('am'))) {
+          window.speechSynthesis.cancel();
+          const utterance = new window.SpeechSynthesisUtterance(amharicNumberWords(currentNumber));
+          utterance.lang = 'am-ET';
+          utterance.rate = 0.9;
+          utterance.onerror = (event) => console.warn('[Amharic speech fallback failed]:', event.error);
+          window.speechSynthesis.speak(utterance);
+          return;
+        }
+        const utterance = new window.SpeechSynthesisUtterance(amharicNumberWords(currentNumber));
+        utterance.lang = 'am-ET';
+        utterance.rate = 0.9;
+        utterance.onerror = (event) => console.warn('[Amharic speech playback failed]:', event.error);
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utterance);
+      } catch (error) {
+        console.warn('Amharic bingo call could not be played:', error.message);
+      }
+    };
+    try {
+      const audio = activeAudioRef.current;
+      if (!audio) return undefined;
+      audio.pause();
+      audio.currentTime = 0;
+      audio.src = `/audio/amharic/${currentNumber}.mp3`;
+      audio.volume = 1;
+      audio.onerror = () => speakFallback();
+      audio.play().catch((error) => {
+        if (!active) return;
+        console.warn(`[Amharic audio clip unavailable for ${currentNumber}]:`, error.message);
+        speakFallback();
+      });
+    } catch (error) {
+      console.warn(`[Amharic audio clip unavailable for ${currentNumber}]:`, error.message);
+      speakFallback();
+    }
+    previousCall.current = currentNumber;
+    return () => {
+      active = false;
+      const audio = activeAudioRef.current;
+      if (audio) {
+        audio.pause();
+        audio.currentTime = 0;
+      }
+      window.speechSynthesis?.cancel();
+    };
+  }, [currentNumber, soundEnabled, callsAreFrozen]);
+  useEffect(() => {
+    try { window.localStorage.setItem('shisho_sound', String(soundEnabled)); }
+    catch (error) { console.warn('Sound preference could not be saved:', error.message); }
+    if (!soundEnabled) {
+      activeAudioRef.current?.pause();
+      if (activeAudioRef.current) activeAudioRef.current.currentTime = 0;
+      window.speechSynthesis?.cancel();
+    }
+  }, [soundEnabled]);
+  const toggleAutoMark = () => {
+    if (autoMark) {
+      setManualMarks(Object.fromEntries(myCards.map((card) => [
+        card.number,
+        (card.numbers || []).filter((value) => value !== 'FREE' && displayedCalledSet.has(Number(value))).map(Number),
+      ])));
+      setAutoMark(false);
+      return;
+    }
+    setAutoMark(true);
+  };
+  const handleManualMark = (card, value, cellIndex) => {
+    if (value === 'FREE') return;
+    const number = Number(value);
+    const key = `${card.number}:${cellIndex}`;
+    if (!displayedCalledSet.has(number)) {
+      telegramWebApp()?.HapticFeedback?.notificationOccurred?.('error');
+      setInvalidCells((cells) => ({ ...cells, [key]: true }));
+      window.setTimeout(() => setInvalidCells((cells) => {
+        const next = { ...cells };
+        delete next[key];
+        return next;
+      }), 320);
+      return;
+    }
+    telegramWebApp()?.HapticFeedback?.impactOccurred?.('light');
+    setManualMarks((marks) => {
+      const selected = new Set(marks[card.number] || []);
+      if (selected.has(number)) selected.delete(number);
+      else selected.add(number);
+      return { ...marks, [card.number]: [...selected] };
+    });
+  };
+  const handleBingoClaim = async () => {
+    if (!claimableCards.length || isClaiming || claimInFlight.current) return;
+    claimInFlight.current = true;
+    setIsClaiming(true);
+    setClaimPaused(true);
+    telegramWebApp()?.HapticFeedback?.notificationOccurred?.('success');
+    try {
+      await onBingo(claimableCards.map((card) => card.number));
+    } catch (error) {
+      console.error('[Bingo claim error]:', error);
+      const message = error.message || 'Error claiming Bingo.';
+      const telegram = telegramWebApp();
+      if (telegram?.showAlert) telegram.showAlert(message);
+      else window.alert(message);
+    } finally {
+      claimInFlight.current = false;
+      setIsClaiming(false);
+      if (room.status !== 'VERIFYING') setClaimPaused(false);
+    }
+  };
+  return <section className="live-game">
+    <header className="live-game-header">
+      <button className="live-back" onClick={onLeave}>← {t.back}</button>
+      <div className="live-brand"><strong>SHISHO BINGO</strong><small>ሺሾ ቢንጎ · {t.roomNumber.replace('{number}', room.roomNumber || room.id)}</small></div>
+      <span aria-hidden="true" />
+    </header>
+    <section className="live-game-hud">
+      <div><small>{t.round}</small><b>#{room.roomNumber || room.id}</b></div>
+      <div className="pot"><small>{t.pot}</small><b>{money(room.pot ?? room.prizePool)}</b></div>
+      <div><small>{t.playersLabel}</small><b>{room.currentPlayers}</b></div>
+      <div><small>{t.stakeLabel}</small><b>{money(room.stake)}</b></div>
+      <div className="called"><small>{t.called}</small><b>{displayedNumbers.length}/75</b></div>
     </section>
-    <div className="game-stats panel">
-      <div><small>POT</small><b>{money(room.prizePool)} BIRR</b></div>
-      <div><small>PLAYERS</small><b>{room.currentPlayers}</b></div>
-      <div><small>STAKE</small><b>{money(room.stake)}</b></div>
-      <div><small>CALL</small><b>{game?.calledNumbers?.length || 0}</b></div>
+    <div className="live-play-arena">
+      <section className="live-board-panel master-panel">
+        <div className="live-master-grid">
+          {['B', 'I', 'N', 'G', 'O'].map((letter) => <b className={`master-col-header ${letter.toLowerCase()}`} key={letter}>{letter}</b>)}
+          {Array.from({ length: 15 }, (_, row) => ['B', 'I', 'N', 'G', 'O'].map((_, column) => {
+            const number = [1, 16, 31, 46, 61][column] + row;
+            return <span className={`master-cell ${displayedCalledSet.has(number) ? 'called' : ''} ${currentNumber === number ? 'current' : ''}`} key={number}>{number}</span>;
+          }))}
+        </div>
+      </section>
+      <section className="live-right-column">
+        <div className="live-call-strip" aria-live="polite">
+          <div className="live-current-call"><small>{t.currentBall}</small>
+            <strong key={currentNumber ?? 'waiting'}>{currentNumber === null ? '—' : bingoLabel(currentNumber)}</strong>
+          </div>
+          <div className="live-recent-calls"><small>{t.recent}</small>
+            <span className="recent-ball">{previousNumber === null ? '—' : bingoLabel(previousNumber)}</span>
+          </div>
+        </div>
+        <div className="live-controls">
+          <button className={`auto-toggle ${autoMark ? 'enabled' : ''}`} aria-pressed={autoMark} onClick={toggleAutoMark}>
+            <span>{t.auto}</span><i><b /></i>
+          </button>
+          <button className={`sound-toggle ${soundEnabled ? 'enabled' : ''}`} aria-pressed={soundEnabled} onClick={() => {
+            if (soundEnabled) {
+                  activeAudioRef.current?.pause();
+                  if (activeAudioRef.current) activeAudioRef.current.currentTime = 0;
+              window.speechSynthesis?.cancel();
+            }
+            setSoundEnabled((value) => !value);
+          }}>
+            {soundEnabled ? '🔊' : '🔇'} {t.sound}
+          </button>
+        </div>
+        {isSpectator
+          ? <div className="live-spectator-card"><span>👁</span><strong>{t.watchingLive}</strong><small>{t.callsSynced}</small></div>
+          : <div className="cartelas-stack">
+            {myCards.map((card) => <article className="live-cartela-card" key={card.number}>
+              <div className="mini-card-title"><span>#{card.number}</span><small>{card.progress || 0}% {t.marked}</small></div>
+              <CardNumbers
+                numbers={card.numbers}
+                cardNumber={card.number}
+                t={t}
+                calledSet={markedNumbersFor(card)}
+                interactive={!autoMark}
+                invalidCells={invalidCells}
+                onManualMark={(value, index) => handleManualMark(card, value, index)}
+              />
+            </article>)}
+          </div>}
+        {!isSpectator && <button
+          className={`btn-bingo btn-bingo-action ${claimableCards.length ? 'active-yellow' : ''}`}
+          disabled={busy || isClaiming || room.status === 'VERIFYING' || !claimableCards.length}
+          onClick={handleBingoClaim}
+        >{isClaiming || room.status === 'VERIFYING' ? t.claimingBingo : t.bingo}</button>}
+      </section>
     </div>
-    <div className="last-number panel"><small>LAST NUMBER</small><strong>{game?.calledNumbers?.length ? bingoLabel(game.calledNumbers.at(-1)) : '—'}</strong><div className="recent">{recent.map((number) => <span key={number}>{bingoLabel(number)}</span>)}</div></div>
-    <section className="section-heading"><h2>{t.callBoard}</h2><button className="outline-button" onClick={onRefresh}>↻ {t.refresh}</button></section>
-    <div className="bingo-board panel">
-      {['B', 'I', 'N', 'G', 'O'].map((letter, col) => <div className="bingo-column" key={letter}>
-        <div className={`bingo-letter letter-${letter}`}>{letter}</div>
-        {Array.from({ length: 15 }, (_, row) => columns[col] + row).map((number) =>
-          <span className={`bingo-cell ${calledSet.has(number) ? 'called' : ''} ${game?.calledNumbers?.at(-1) === number ? 'latest' : ''}`} key={number}>{number}</span>)}
-      </div>)}
-    </div>
-    {myCards.length > 1 && <div className="card-switch">{myCards.map((card, index) => <button className={selected === index ? 'selected' : ''} key={card.number} onClick={() => setSelected(index)}>Cartela #{card.number}</button>)}</div>}
-    {activeCard && <section className="panel player-card"><div className="section-heading"><h2>My Cartela #{activeCard.number}</h2><span>{activeCard.progress || 0}%</span></div><CardNumbers numbers={activeCard.numbers} calledSet={calledSet} /></section>}
-    <p className="muted">{t.rules}</p>
-    {activeCard && <button disabled={busy} className="primary-button" onClick={() => onBingo(activeCard.number)}>🎉 BINGO!</button>}
-    <button disabled={busy} className="danger-button" onClick={onLeave}>{t.leave}</button>
-  </>;
+    <footer className="live-game-footer">
+      <button className="footer-leave" onClick={onLeave}>🚪 {t.leave}</button>
+      <button className="footer-refresh" onClick={onRefresh}>🔄 {t.refresh}</button>
+    </footer>
+  </section>;
 }
 
-function CardNumbers({ numbers, calledSet }) {
-  const values = numbers || [];
+function CardNumbers({ numbers, cardNumber, t, calledSet, interactive = false, invalidCells = {}, onManualMark }) {
+  const values = Array.isArray(numbers) && numbers.length === 25 ? numbers : Array(25).fill(null);
+  const markedPattern = winningPatternForCard(values, calledSet);
   return <div className="player-grid">
     {['B', 'I', 'N', 'G', 'O'].map((letter) => <b key={`h-${letter}`}>{letter}</b>)}
-    {values.map((value, index) => <span key={index} className={`${value === 'FREE' ? 'free' : ''} ${calledSet.has(Number(value)) ? 'marked' : ''}`}>{value === 'FREE' ? '★' : value}</span>)}
+    {values.map((value, index) => <button
+      type="button"
+      key={index}
+      className={`cartela-cell ${value === 'FREE' ? 'free' : ''} ${value === 'FREE' || calledSet.has(Number(value)) ? 'marked' : ''} ${markedPattern?.has(index) ? 'win-cell' : ''} ${invalidCells?.[`${cardNumber}:${index}`] ? 'invalid-click' : ''}`}
+      disabled={!interactive || value == null || value === 'FREE'}
+      aria-label={value === 'FREE' ? t.freeSpaceLabel : `${t.cartelaCellNumber.replace('{number}', value)}${calledSet.has(Number(value)) ? `, ${t.markedCell}` : ''}`}
+      onClick={() => onManualMark?.(value, index)}
+    >{value === 'FREE' ? '★' : value ?? '—'}</button>)}
   </div>;
+}
+
+function winningPatternForCard(numbers = [], calledSet = new Set()) {
+  const marked = numbers.map((value) => value === 'FREE' || calledSet.has(Number(value)));
+  for (let row = 0; row < 5; row += 1) {
+    const indexes = Array.from({ length: 5 }, (_, column) => row * 5 + column);
+    if (indexes.every((index) => marked[index])) return new Set(indexes);
+  }
+  for (let column = 0; column < 5; column += 1) {
+    const indexes = Array.from({ length: 5 }, (_, row) => row * 5 + column);
+    if (indexes.every((index) => marked[index])) return new Set(indexes);
+  }
+  const diagonal = [0, 6, 12, 18, 24];
+  if (diagonal.every((index) => marked[index])) return new Set(diagonal);
+  const reverseDiagonal = [4, 8, 12, 16, 20];
+  if (reverseDiagonal.every((index) => marked[index])) return new Set(reverseDiagonal);
+  const corners = [0, 4, 20, 24];
+  if (corners.every((index) => marked[index])) return new Set(corners);
+  return null;
 }
 
 function bingoLabel(number) {
@@ -800,22 +1373,63 @@ function bingoLabel(number) {
   return `${n <= 15 ? 'B' : n <= 30 ? 'I' : n <= 45 ? 'N' : n <= 60 ? 'G' : 'O'}-${n}`;
 }
 
-function WinnerScreen({ game, room, t, onBack }) {
-  return <section className="winner panel">
-    <div className="winner-crown">♛</div><div className="eyebrow">SHISHO BINGO</div><h1>{game?.winners?.length ? 'BINGO!' : 'GAME OVER'}</h1>
-    <p>{game?.winners?.length ? 'We have a winner!' : 'The game ended without a winning cartela.'}</p>
-    {(game?.winners || []).map((winner) => <div className="winner-row" key={`${winner.userId}-${winner.cartelaNumber}`}>
-      <strong>{winner.displayName}</strong><span>Cartela #{winner.cartelaNumber} · {winner.pattern}</span><b>{money(winner.prize)} BIRR</b>
-    </div>)}
-    {!game?.winners?.length && <p className="muted">Winner results are being loaded from the game service.</p>}
-    <p className="muted">Room #{room?.roomNumber || room?.id}</p><button className="primary-button" onClick={onBack}>Back to rooms</button>
+function WinnerScreen({ game, room, t, onNextRound }) {
+  const [seconds, setSeconds] = useState(7);
+  const remainingSeconds = useRef(7);
+  const nextRoundRef = useRef(onNextRound);
+  const winners = game?.winners || [];
+  const winner = winners[0];
+  const winnerPlayerCount = new Set(winners.map((item) => item.userId)).size;
+  const winningCard = winner && room?.cartelas?.find((card) => card.number === winner.cartelaNumber);
+  const winnerCalledNumbers = parseNumberList(game?.calledNumbers);
+  const called = new Set(winnerCalledNumbers);
+  const highlighted = winner && winningCard
+    ? winningPatternForCard(winningCard.numbers, called)
+    : null;
+  useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      remainingSeconds.current -= 1;
+      setSeconds(remainingSeconds.current);
+      if (remainingSeconds.current <= 0) {
+        window.clearInterval(timer);
+        nextRoundRef.current();
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <section className={`winner-celebration ${winners.length ? 'has-winner' : ''}`}>
+    <div className="winner-glow" aria-hidden="true" />
+    <div className="winner-trophy">{winners.length ? '👑' : '🎱'}</div>
+    <div className="eyebrow">SHISHO BINGO · {t.roomNumber.replace('{number}', room?.roomNumber || room?.id || '—')}</div>
+    <h1>{winners.length ? t.winnerHeadline : t.gameOver}</h1>
+    <p className="winner-subtitle">{winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
+    <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool ?? winner?.prize))}</div>
+    {winners.length > 0 && <div className="winner-list">
+      {winners.map((item) => <div key={`${item.userId}-${item.cartelaNumber}`}>
+        <b>👑 {item.username ? `@${item.username}` : item.displayName}</b>
+        <span>#{item.cartelaNumber}</span>
+      </div>)}
+    </div>}
+    {winningCard && <section className="winner-card-section">
+      <div className="winner-card-title"><span>{t.winningCartela.replace('{number}', winningCard.number)}</span><small>{game?.callIndex || winnerCalledNumbers.length} {t.calls}</small></div>
+      <div className="player-grid winner-player-grid">
+        {['B', 'I', 'N', 'G', 'O'].map((letter) => <b key={`winner-${letter}`}>{letter}</b>)}
+        {winningCard.numbers.map((value, index) => <span key={index}
+          className={`${value === 'FREE' ? 'free marked' : ''} ${value !== 'FREE' && called.has(Number(value)) ? 'marked' : ''} ${highlighted?.has(index) ? 'winning-cell' : ''}`}>
+          {value === 'FREE' ? '★' : value}
+        </span>)}
+      </div>
+    </section>}
+    {winner && <div className="winner-verified">{t.verified}</div>}
+    <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>
   </section>;
 }
 
 function RanksScreen({ ranks, t, userId }) {
   return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">🏆 {t.ranks}</h1>
     {ranks.length ? <div className="panel rank-list">{ranks.map((rank, i) => <div className="rank-row" key={rank.userId || i}>
-      <span className="rank-position">{rank.rank || i + 1}</span><strong>{rank.displayName}{rank.userId === userId ? ' (You)' : ''}</strong><span>{rank.gamesWon} wins</span><b>{money(rank.winnings)} BIRR</b>
+      <span className="rank-position">{rank.rank || i + 1}</span><strong>{rank.displayName}{rank.userId === userId ? ` ${t.you}` : ''}</strong><span>{rank.gamesWon} {t.wins}</span><b>{money(rank.winnings)} {t.currency}</b>
     </div>)}</div> : <div className="empty panel"><span className="empty-icon">👑</span><strong>{t.noRanks}</strong></div>}
   </>;
 }
@@ -823,9 +1437,9 @@ function RanksScreen({ ranks, t, userId }) {
 function HistoryScreen({ history, t }) {
   return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">📜 {t.history}</h1>
     {history.length ? <div className="history-list">{history.map((item, index) => <article className="panel history-item" key={item.id || index}>
-      <div className="row"><strong>{item.roomId ? `Room #${item.roomId}` : item.type}</strong><span className="status">{item.result || item.status || item.type}</span></div>
-      <p>{item.cartelas ? `Cartelas: ${item.cartelas.join(', ')} · Stake: ${money(item.stake)} BIRR${item.pattern ? ` · Pattern: ${item.pattern}` : ''}` : item.description}</p>
-      <div className="row muted"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}</span><b>{item.prize ? `${money(item.prize)} BIRR` : item.amount ? `${money(item.amount)} BIRR` : ''}</b></div>
+      <div className="row"><strong>{item.roomId ? t.historyRoom.replace('{id}', item.roomId) : item.type}</strong><span className="status">{item.result || item.status || item.type}</span></div>
+      <p>{item.cartelas ? `${t.cartelasLabel} ${item.cartelas.join(', ')} · ${t.stakeLabelInHistory} ${money(item.stake)} ${t.currency}${item.pattern ? ` · ${t.patternLabel} ${item.pattern}` : ''}` : item.description}</p>
+      <div className="row muted"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}</span><b>{item.prize ? `${money(item.prize)} ${t.currency}` : item.amount ? `${money(item.amount)} ${t.currency}` : ''}</b></div>
     </article>)}</div> : <div className="empty panel"><span className="empty-icon">📜</span><strong>{t.noHistory}</strong></div>}
   </>;
 }
@@ -839,36 +1453,36 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, a
       if (navigator.share) await navigator.share({ title: 'SHISHO BINGO', url: referral.referralUrl });
       else {
         await navigator.clipboard.writeText(referral.referralUrl);
-        setRoomMessage('Invite link copied.');
+        setRoomMessage(t.inviteCopied);
       }
     } catch (error) {
-      if (error.name !== 'AbortError') setRoomMessage(error.message);
+      if (error.name !== 'AbortError') setRoomMessage(t.shareFailed);
     }
   }
-  return <><div className="eyebrow">PLAYER PROFILE</div><h1 className="page-title">👤 {t.profile}</h1>
+  return <><div className="eyebrow">{t.playerProfile}</div><h1 className="page-title">👤 {t.profile}</h1>
     <section className="profile-card panel"><div className="avatar">{(info?.firstName || 'S').slice(0, 1).toUpperCase()}</div>
-      <h2>{[info?.firstName, info?.lastName].filter(Boolean).join(' ') || t.loading}</h2><p className="muted">{info?.username ? `@${info.username} · ` : ''}ID {info?.id || '—'}</p>
+      <h2>{[info?.firstName, info?.lastName].filter(Boolean).join(' ') || t.loading}</h2><p className="muted">{info?.username ? `@${info.username} · ` : ''}{t.playerId} {info?.id || '—'}</p>
       <div className="profile-stats">
-        <Stat label={t.balance} value={wallet === null ? t.unavailable : `${money(wallet)} BIRR`} />
-        <Stat label="Games won" value={profile?.games?.won ?? '—'} />
-        <Stat label="Winnings" value={profile?.games?.winnings ? `${money(profile.games.winnings)} BIRR` : '—'} />
-        <Stat label="Win rate" value={`${profile?.games?.winRate ?? '—'}%`} />
-        <Stat label="Referrals" value={profile?.referrals?.successful ?? '—'} />
+        <Stat label={t.balance} value={wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`} />
+        <Stat label={t.gamesWon} value={profile?.games?.won ?? '—'} />
+        <Stat label={t.winnings} value={profile?.games?.winnings ? `${money(profile.games.winnings)} ${t.currency}` : '—'} />
+        <Stat label={t.winRate} value={`${profile?.games?.winRate ?? '—'}%`} />
+        <Stat label={t.referrals} value={profile?.referrals?.successful ?? '—'} />
       </div>
       <button disabled={busy} className="outline-button" onClick={onRefresh}>↻ {t.refresh}</button>
     </section>
-    <section className="panel settings"><h2>Settings</h2><div className="row"><span>{t.language}</span>
-      <div className="language-control"><button className={profile?.user?.language === 'en' ? 'selected' : ''} onClick={() => onLanguage('en')}>🇬🇧 English</button><button className={profile?.user?.language === 'am' ? 'selected' : ''} onClick={() => onLanguage('am')}>🇪🇹 አማርኛ</button></div>
-    </div><div className="row"><span>Rules</span><span className="muted">{t.rules}</span></div>
+    <section className="panel settings"><h2>{t.settingsTitle}</h2><div className="row"><span>{t.language}</span>
+      <div className="language-control"><button className={info?.language === 'en' ? 'selected' : ''} onClick={() => onLanguage('en')}>🇬🇧 {t.languageEnglish}</button><button className={info?.language === 'am' ? 'selected' : ''} onClick={() => onLanguage('am')}>🇪🇹 {t.languageAmharic}</button></div>
+    </div><div className="row"><span>{t.rulesTitle}</span><span className="muted">{t.rules}</span></div>
       <button className="outline-button" onClick={onRanks}>🏆 {t.ranks}</button>
     </section>
-    <section className="panel settings"><h2>{t.share}</h2>
+    <section className="panel settings"><h2>{t.shareAndInvite}</h2>
       <p className="muted">{referral?.referralUrl || t.loading}</p>
       <div className="row">
-        <button className="outline-button" onClick={shareInvite} disabled={!referral?.referralUrl}>{t.copy} / Share</button>
+        <button className="outline-button" onClick={shareInvite} disabled={!referral?.referralUrl}>{t.copy} / {t.shareAction}</button>
         <button className="outline-button" onClick={() => appInfo?.supportUrl && telegramWebApp()?.openTelegramLink(appInfo.supportUrl)} disabled={!appInfo?.supportUrl}>{t.support}</button>
       </div>
-      <p className="muted">Successful referrals: {referral?.successful ?? '—'}</p>
+      <p className="muted">{t.successfulReferrals} {referral?.successful ?? '—'}</p>
       {roomMessage && <p className="muted" role="status">{roomMessage}</p>}
     </section>
   </>;
@@ -906,7 +1520,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
         method: 'POST',
         body: { method, amount, providerReference: reference },
       });
-      setStatus(`Deposit request #${data.request.id} submitted; admin approval is required.`);
+      setStatus(t.depositSubmitted.replace('{id}', data.request.id));
       setAmount('');
       setReference('');
     } catch (error) {
@@ -931,7 +1545,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
           idempotencyKey: crypto.randomUUID().replaceAll('-', ''),
         },
       });
-      setWithdrawStatus(`Withdrawal request #${data.request.id} submitted for admin review.`);
+      setWithdrawStatus(t.withdrawalSubmitted.replace('{id}', data.request.id));
       setWithdrawAmount('');
       setPayoutDetails('');
       await onRefresh();
@@ -942,22 +1556,22 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
       setBusy(false);
     }
   }
-  return <><div className="eyebrow">SHARED WALLET</div><h1 className="page-title">💰 {t.balance}</h1>
-    <section className="panel wallet-panel"><small>Available balance</small><strong>{wallet === null ? t.unavailable : `${money(wallet)} BIRR`}</strong><button className="outline-button" onClick={() => onRefresh().catch((error) => onError(error.message))}>↻ {t.refresh}</button></section>
+  return <><div className="eyebrow">{t.sharedWallet}</div><h1 className="page-title">💰 {t.balance}</h1>
+    <section className="panel wallet-panel"><small>{t.availableBalance}</small><strong>{wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`}</strong><button className="outline-button" onClick={() => onRefresh().catch((error) => onError(error.message))}>↻ {t.refresh}</button></section>
     <section className="panel wallet-panel"><h2>{t.deposit}</h2>{methods.length ? <form onSubmit={submit}>
-      <label>Payment method<select value={method} onChange={(event) => setMethod(event.target.value)}>{methods.map((item) => <option key={item.method} value={item.method}>{item.label}</option>)}</select></label>
+      <label>{t.paymentMethod}<select value={method} onChange={(event) => setMethod(event.target.value)}>{methods.map((item) => <option key={item.method} value={item.method}>{item.label}</option>)}</select></label>
       {current && <p className="payment-details">{current.label} · {current.accountName} · {current.account}</p>}
-      <label>Amount (BIRR)<input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
-      <label>Transaction reference<input required maxLength="128" value={reference} onChange={(event) => setReference(event.target.value)} /></label>
-      <button className="primary-button" disabled={busy}>{busy ? t.loading : 'Submit for approval'}</button>
+      <label>{t.amountBirr}<input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
+      <label>{t.transactionReference}<input required maxLength="128" value={reference} onChange={(event) => setReference(event.target.value)} /></label>
+      <button className="primary-button" disabled={busy}>{busy ? t.loading : t.submitApproval}</button>
       {status && <p className="muted">{status}</p>}
-    </form> : <p className="muted">{status || 'Payment methods are not configured.'}</p>}</section>
+    </form> : <p className="muted">{status || t.depositOptionsMissing}</p>}</section>
     <section className="panel wallet-panel"><h2>{t.withdraw}</h2>
-      <p className="muted">Minimum withdrawal: 50.00 BIRR. Requests reserve funds while an administrator reviews the payout.</p>
+      <p className="muted">{t.minWithdrawal}</p>
       <form onSubmit={submitWithdrawal}>
-        <label>Amount (BIRR)<input required inputMode="decimal" value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} /></label>
-        <label>Payment method<select value={withdrawMethod} onChange={(event) => setWithdrawMethod(event.target.value)}><option value="TELEBIRR">Telebirr</option><option value="CBE">CBE</option></select></label>
-        <label>Phone/account details<input required minLength="5" maxLength="191" value={payoutDetails} onChange={(event) => setPayoutDetails(event.target.value)} /></label>
+        <label>{t.amountBirr}<input required inputMode="decimal" value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} /></label>
+        <label>{t.paymentMethod}<select value={withdrawMethod} onChange={(event) => setWithdrawMethod(event.target.value)}><option value="TELEBIRR">Telebirr</option><option value="CBE">CBE</option></select></label>
+        <label>{t.accountDetails}<input required minLength="5" maxLength="191" value={payoutDetails} onChange={(event) => setPayoutDetails(event.target.value)} /></label>
         <button className="primary-button" disabled={busy}>{busy ? t.loading : t.withdraw}</button>
         {withdrawStatus && <p className="muted" role="status">{withdrawStatus}</p>}
       </form>
@@ -1192,6 +1806,160 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-closed-note,.cartela-load-error{margin:8px 14px;padding:9px 10px;border:1px solid #573b2a;border-radius:10px;background:#20152a;color:#edc47c;font-size:11px}
 @media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:10px;padding-left:10px}.cartela-btn{border-radius:8px;font-size:12px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
 @media(min-width:600px){.cartela-grid-8col{gap:8px;padding-right:20px;padding-left:20px}.cartela-btn{font-size:15px}}
+.game-app-shell{width:100%;max-width:900px;height:100dvh;min-height:100dvh;overflow:hidden;padding:0;background:#0f0920}
+.game-app-shell>.content{height:100%;overflow:hidden;padding:0}
+.game-app-shell .live-game{display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto auto auto;gap:7px;width:100%;height:100dvh;min-height:0;overflow:hidden;padding:calc(7px + env(safe-area-inset-top)) 10px calc(7px + env(safe-area-inset-bottom));background:radial-gradient(ellipse at 50% -16%,#2c1945 0,transparent 48%),#0f0920}
+.live-game-header{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;min-height:38px}
+.live-back,.live-refresh{min-height:32px;border:1px solid #342451;border-radius:10px;background:#1c1033;color:#ded4ed;font-size:11px;font-weight:800}
+.live-back{justify-self:start;padding:5px 9px}.live-refresh{justify-self:end;width:34px;font-size:20px;line-height:1}
+.live-brand{display:grid;gap:1px;text-align:center}.live-brand strong{color:#f1d46b;font-size:12px;letter-spacing:.14em}.live-brand small{color:#9d91ae;font-size:8px;font-weight:800;letter-spacing:.08em}
+.live-game-hud{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.live-game-hud>div{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:1px 5px;min-width:0;padding:5px 7px;border:1px solid #30204a;border-radius:10px;background:#1c1033}
+.live-game-hud small{grid-column:1/-1;color:#998eaa;font-size:8px;font-weight:850;letter-spacing:.08em}
+.live-game-hud b{overflow:hidden;color:#fff;font-size:13px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}.live-game-hud i{justify-self:end;color:#9486a6;font-size:7px;font-style:normal;font-weight:800}
+.live-game-hud>div:first-child b{color:#f6c954}.live-game-hud .live-status{font-size:10px;color:#80e6b5}
+.live-call-strip{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:10px;min-height:62px;padding:6px 10px;border:1px solid #392650;border-radius:12px;background:#1b102c}
+.live-current-call{display:grid;justify-items:center;min-width:72px;padding:2px 9px;border-right:1px solid #423153}
+.live-current-call small,.live-recent-calls>small{color:#a396b3;font-size:7px;font-weight:850;letter-spacing:.08em;white-space:nowrap}
+.live-current-call strong{color:#ffe17a;font-size:24px;font-weight:950;line-height:1.1;text-shadow:0 0 16px #f1b92b66;animation:call-pop .28s ease-out}
+.live-recent-calls{min-width:0}.live-recent-calls>div{display:flex;align-items:center;gap:5px;min-height:24px;overflow:hidden;margin-top:4px}
+.live-recent-calls span{flex:none;padding:4px 6px;border:1px solid #37284a;border-radius:7px;background:#110a1c;color:#cfc3dc;font-size:8px;font-weight:800}
+.live-recent-calls .recent-current{border-color:#8f6d26;background:#392b17;color:#ffe17a}.live-recent-calls .recent-empty{border:0;background:transparent;color:#9387a2;font-weight:500}
+.live-board-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:7px;min-height:0}
+.live-board-panel{display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden;padding:7px;border:1px solid #30204a;border-radius:12px;background:#1a1028}
+.live-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:4px;min-height:32px;margin-bottom:4px}
+.live-panel-heading>div{display:grid;gap:1px;min-width:0}.live-panel-heading small{color:#9789a8;font-size:7px;font-weight:850;letter-spacing:.1em}.live-panel-heading h2{overflow:hidden;margin:0;color:#f5efff;font-size:10px;line-height:1.15;text-overflow:ellipsis;white-space:nowrap}
+.live-panel-heading>span{flex:none;color:#f4d77d;font-size:9px;font-weight:850}
+.live-master-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;flex:1;min-height:0}
+.live-master-column{display:flex;min-width:0;min-height:0;flex-direction:column;gap:2px}
+.live-master-letter{display:grid;place-items:center;flex:none;height:18px;border-radius:5px;background:#33224d;color:#f7e7b0;font-size:10px}
+.live-master-number{display:grid;place-items:center;flex:1;min-height:0;overflow:hidden;border:1px solid #30213e;border-radius:3px;background:#120b1c;color:#a99cb8;font-size:clamp(7px,2.3vw,11px);font-weight:700;font-variant-numeric:tabular-nums}
+.live-master-number.called{border-color:#594478;background:#392b4e;color:#ded0f0}.live-master-number.latest{border-color:#f5ca5e;background:#f0c552;color:#231805;box-shadow:0 0 9px #f5ca5e77}
+.live-card-tabs{display:flex;gap:4px;margin:0 0 4px}.live-card-tabs button{flex:1;padding:4px;border:1px solid #38284b;border-radius:6px;background:#120b1c;color:#aa9bbd;font-size:8px;font-weight:800}.live-card-tabs button.selected{border-color:#10b981;background:#0f4836;color:#b1f5d6}
+.player-panel>.player-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr));gap:3px;flex:1;min-height:0}
+.player-grid>b{display:grid;place-items:center;min-width:0;border-radius:4px;background:#33224d;color:#f1d777;font-size:10px}
+.player-grid>span{display:grid;place-items:center;min-width:0;min-height:0;overflow:hidden;border:1px solid #382b48;border-radius:4px;background:#110b1a;color:#e4dcea;font-size:clamp(8px,2.5vw,12px);font-weight:850}
+.player-grid>span.marked{border-color:#10a76f;background:#12533c;color:#e1fff0}.player-grid>span.free{color:#ffe17a}.player-grid>span.winning-cell{border-color:#ffe27c;background:#f0c552;color:#261904;box-shadow:0 0 10px #f6cb5d99;animation:winning-glow 1.1s ease-in-out infinite alternate}
+.spectator-message{display:grid;align-content:center;justify-items:center;flex:1;gap:8px;padding:12px;text-align:center}.spectator-message span{font-size:24px}.spectator-message strong{color:#e7dafa;font-size:12px}.spectator-message small{color:#a394b5;font-size:9px;line-height:1.5}
+.live-card-progress{display:grid;grid-template-columns:1fr auto;gap:3px 6px;padding-top:5px;color:#a89bb7;font-size:8px}.live-card-progress b{color:#c9f3dc}.live-card-progress>div{grid-column:1/-1;height:3px;overflow:hidden;border-radius:9px;background:#342842}.live-card-progress i{display:block;height:100%;border-radius:9px;background:#10b981}
+.live-lower-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px;min-height:39px}.live-pattern-note{overflow:hidden;color:#b3a6c2;font-size:9px;line-height:1.3;text-overflow:ellipsis}
+.live-bingo-button{min-width:92px;min-height:34px;padding:6px 11px;border:0;border-radius:9px;background:linear-gradient(110deg,#ffe17a,#e6a91f);color:#261903;font-size:10px;font-weight:950;letter-spacing:.06em}.live-bingo-button:disabled{filter:saturate(.25);opacity:.4}
+.live-activity{display:flex;min-height:48px;flex-direction:column;justify-content:center;gap:3px;padding:5px 8px;border:1px solid #2e2140;border-radius:9px;background:#170e23}
+.live-activity-heading{display:flex;align-items:center;justify-content:space-between;gap:4px}.live-activity-heading>div{display:flex;align-items:center;gap:6px}.live-activity-heading small{color:#9386a4;font-size:7px;font-weight:850}.live-activity-heading strong{color:#e5d9f0;font-size:9px}.live-activity-heading button{border:0;background:transparent;color:#bda6dc;font-size:8px}
+.live-activity>p{margin:0;color:#9386a4;font-size:8px}.live-activity-list{display:flex;gap:8px;overflow:hidden}.live-activity-list span{overflow:hidden;color:#c2b4d0;font-size:7px;text-overflow:ellipsis;white-space:nowrap}
+.live-game-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:32px;padding:0 2px;color:#8e819e;font-size:7px;font-weight:850;letter-spacing:.08em}
+.live-game-footer button{padding:6px 10px;border:1px solid #392b4d;border-radius:8px;background:#1b1029;color:#c5b5d4;font-size:8px;font-weight:850;letter-spacing:.05em}
+.game-feedback{position:fixed;top:calc(env(safe-area-inset-top) + 8px);left:50%;z-index:20;display:flex;align-items:center;gap:8px;width:max-content;max-width:calc(100% - 22px);padding:8px 12px;transform:translateX(-50%);border:1px solid #784043;border-radius:9px;background:#3c1727;color:#ffcfcb;font-size:10px;box-shadow:0 4px 18px #0009}
+.game-feedback button{border:0;background:transparent;color:inherit;font-size:16px}
+.winner-celebration{position:relative;display:grid;justify-items:center;gap:10px;max-width:510px;margin:0 auto;padding:24px 14px 20px;overflow:hidden;text-align:center}
+.winner-celebration h1{margin:0;color:#f6d36c;font-size:clamp(36px,12vw,56px);font-weight:1000;letter-spacing:.06em;text-shadow:0 0 26px #f0c85a66}.winner-celebration>.eyebrow{color:#bda8db}
+.winner-trophy{z-index:1;font-size:58px;line-height:1;filter:drop-shadow(0 0 20px #ffd45899);animation:trophy-bounce 1.2s ease-in-out infinite alternate}
+.winner-subtitle{margin:0;color:#c7b9d5;font-size:13px}
+.winner-podium{z-index:1;display:grid;justify-items:center;gap:4px;width:100%;padding:14px 10px;border:1px solid #73551e;border-radius:15px;background:linear-gradient(145deg,#2b1d31,#17101f);box-shadow:0 0 26px #ebbd4230}
+.winner-podium small,.winner-card-title{color:#e6c761;font-size:9px;font-weight:900;letter-spacing:.13em}.winner-podium>strong{color:#fff;font-size:20px}.winner-podium>span{color:#c4b4d1;font-size:10px}.winner-podium>b{color:#ffdf70;font-size:22px}
+.winner-card-section{z-index:1;width:100%;max-width:390px;padding:10px;border:1px solid #47355d;border-radius:13px;background:#1b1129}
+.winner-card-title{display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}.winner-card-title small{color:#a899b9;font-size:8px}
+.winner-player-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(6,minmax(38px,1fr));gap:4px}
+.winner-player-grid>b{display:grid;place-items:center;border-radius:5px;background:#33224d;color:#f1d777}.winner-player-grid>span{display:grid;place-items:center;min-height:38px;border:1px solid #382b48;border-radius:5px;background:#110b1a;color:#eee5f4;font-size:12px;font-weight:850}.winner-player-grid>span.marked{background:#12533c;color:#e1fff0}.winner-player-grid>span.winning-cell{border-color:#ffe27c;background:#f0c552;color:#261904;box-shadow:0 0 12px #f6cb5d99}
+.winner-list{display:grid;gap:5px;width:100%}.winner-list>div{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:8px 10px;border:1px solid #332742;border-radius:9px;background:#181021;text-align:left}.winner-list>div>span{color:#ab9bbd;font-size:9px}.winner-list>div>strong{grid-column:2;grid-row:1/3;align-self:center;color:#f3d36e;font-size:11px}
+.winner-round-stats{display:flex;justify-content:center;gap:24px;color:#f2e9f8;font-size:16px;font-weight:900}.winner-round-stats span{display:grid;gap:1px}.winner-round-stats small{color:#9f91ad;font-size:7px;letter-spacing:.08em}
+.winner-home-button{width:100%;min-height:43px;border:0;border-radius:12px;background:linear-gradient(110deg,#ffe17a,#e6a91f);color:#261903;font-size:11px;font-weight:950;letter-spacing:.08em}
+.winner-confetti{position:absolute;inset:0;pointer-events:none}.winner-confetti i{position:absolute;color:#f4d263;font-size:18px;font-style:normal;animation:confetti-fall 2.8s ease-in-out infinite}.winner-confetti i:nth-child(1){left:9%;top:5%;animation-delay:-.5s}.winner-confetti i:nth-child(2){left:86%;top:8%;animation-delay:-1.4s;color:#ba95f4}.winner-confetti i:nth-child(3){left:20%;top:26%;animation-delay:-2s}.winner-confetti i:nth-child(4){left:76%;top:32%;animation-delay:-.9s;color:#73deb1}.winner-confetti i:nth-child(5){left:48%;top:2%;animation-delay:-1.8s}
+@keyframes call-pop{from{transform:scale(.65);opacity:.4}to{transform:scale(1);opacity:1}}@keyframes winning-glow{to{box-shadow:0 0 16px #f6cb5dcc;transform:scale(1.03)}}@keyframes trophy-bounce{to{transform:translateY(-4px) rotate(3deg)}}@keyframes confetti-fall{50%{transform:translateY(16px) rotate(90deg);opacity:.55}}
+@media(max-height:650px){.game-app-shell .live-game{gap:4px;padding-top:calc(4px + env(safe-area-inset-top));padding-bottom:calc(4px + env(safe-area-inset-bottom))}.live-game-header{min-height:30px}.live-game-hud>div{padding:3px 5px}.live-call-strip{min-height:49px}.live-current-call strong{font-size:20px}.live-activity{min-height:38px}.live-board-panel{padding:5px}.live-master-letter{height:14px}.live-panel-heading{min-height:26px}}
+@media(max-width:360px){.game-app-shell .live-game{padding-right:6px;padding-left:6px}.live-board-pair{gap:5px}.live-board-panel{padding:5px}.live-call-strip{gap:5px;padding-right:6px;padding-left:6px}.live-game-hud{gap:4px}.live-game-hud>div{padding-right:4px;padding-left:4px}.live-game-hud b{font-size:11px}.live-master-board,.player-panel>.player-grid{gap:2px}.live-master-number{font-size:7px}.live-activity-list span{font-size:6px}}
+@media(prefers-reduced-motion:reduce){.live-current-call strong,.player-grid>span.winning-cell,.winner-trophy,.winner-confetti i{animation:none}}
+.game-app-shell .live-game{grid-template-rows:auto auto minmax(0,1fr) auto;gap:6px}
+.live-game-hud{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;padding:7px 8px;border:1px solid #28174a;border-radius:9px;background:#0d071c}
+.live-game-hud>div{display:grid;grid-template-columns:minmax(0,1fr);justify-items:center;gap:2px;padding:4px 2px;border:1px solid #28174a;border-radius:7px;background:#170d2c}
+.live-game-hud small{grid-column:auto;color:#8e7ea8;font-size:8px;letter-spacing:.04em}
+.live-game-hud b{font-size:clamp(9px,2.8vw,13px);color:#fff}
+.live-game-hud .pot b{color:#f59e0b}.live-game-hud .called b{color:#ef4444}
+.live-play-arena{display:grid;grid-template-columns:minmax(0,.72fr) minmax(0,1.28fr);gap:7px;min-height:0;padding:0}
+.master-panel{padding:4px;background:#120924}
+.live-master-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:18px repeat(15,minmax(0,1fr));gap:2px;width:100%;height:100%;min-height:0;padding:3px;border-radius:7px;background:#120924}
+.master-col-header{display:grid;place-items:center;min-width:0;border-radius:4px;color:#fff;font-size:10px;font-weight:900}
+.master-col-header.b{background:#10b981}.master-col-header.i{background:#8b5cf6}.master-col-header.n{background:#f97316}.master-col-header.g{background:#3b82f6}.master-col-header.o{background:#ec4899}
+.master-cell{display:flex;align-items:center;justify-content:center;min-width:0;min-height:0;border-radius:3px;background:#0a0515;color:#55486d;font-size:clamp(7px,2.2vw,10px);font-weight:750}
+.master-cell.called{background:#2563eb;color:#fff;font-weight:900}.master-cell.current{background:#f97316;color:#fff;box-shadow:0 0 7px #f97316}
+.live-right-column{display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;gap:5px;min-width:0;min-height:0}
+.live-call-strip{display:grid;grid-template-columns:1fr 1fr;min-height:64px;gap:3px;padding:5px;border-radius:12px;background:#160c25}
+.live-current-call{border:0;padding:0}.live-current-call strong{display:grid;place-items:center;width:44px;height:44px;border:2px solid #ffd35b;border-radius:50%;background:radial-gradient(circle at 35% 25%,#29dca0,#087b61 70%);color:#fff;font-size:15px;box-shadow:0 0 12px #f8d36f99,0 0 17px #00c99255}
+.live-recent-calls{display:grid;justify-items:center;align-content:center;gap:3px}.live-recent-calls>small{font-size:7px}.live-recent-calls .recent-ball{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#793bd0;color:#fff;font-size:9px;font-weight:900;box-shadow:0 0 10px #9d61ff70}
+.live-controls{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.auto-toggle,.sound-toggle{display:flex;align-items:center;justify-content:center;gap:8px;min-height:31px;border:1px solid #302044;border-radius:18px;background:#160d24;color:#e6d9f4;font-size:10px;font-weight:800}
+.auto-toggle i{position:relative;width:34px;height:18px;border-radius:20px;background:#46364f;transition:background .15s}.auto-toggle i b{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#c5b8d0;transition:transform .15s}.auto-toggle.enabled i{background:#c7a12d}.auto-toggle.enabled i b{transform:translateX(16px);background:#fff}
+.sound-toggle.enabled{border-color:#517354;background:#14392c;color:#bff5d6}
+.cartelas-stack{display:flex;min-height:0;flex-direction:column;gap:5px;overflow:hidden}
+.live-cartela-card{display:flex;min-height:0;flex:1;flex-direction:column;gap:3px;padding:3px;border:1px solid #28174d;border-radius:11px;background:#160c2e}
+.mini-card-title{display:flex;align-items:center;justify-content:center;gap:8px;min-height:14px;color:#d4b34e;font-size:10px;font-weight:900}
+.mini-card-title small{color:#887998;font-size:6px;font-weight:750}
+.live-cartela-card .player-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(6,minmax(0,1fr));gap:2px;flex:1;min-height:0}
+.live-cartela-card .player-grid>b{border-radius:3px;background:transparent;color:#d0ac44;font-size:8px}
+.live-cartela-card .player-grid>span{border-color:#392653;border-radius:4px;background:#21153b;color:#fff;font-size:clamp(7px,2.5vw,11px)}
+.live-cartela-card .player-grid>span.marked{border-color:#12bd80;background:#10b981;color:#fff}.live-cartela-card .player-grid>span.free{color:#000}
+.live-cartela-card .player-grid>span.winning-cell{border-color:#ffd75b;background:#f59e0b;color:#120b17}
+.live-cartela-card{flex:0 0 auto;overflow:hidden}
+.cartelas-stack{justify-content:space-around;overflow-y:auto;scrollbar-width:none}
+.cartelas-stack::-webkit-scrollbar{display:none}
+.live-cartela-card .player-grid{grid-template-rows:10px repeat(5,auto);align-content:start;flex:none;width:min(100%,max(68px,calc(41.67dvh - 196px)));margin:0 auto}
+.live-cartela-card .player-grid>b{min-height:10px;padding:0}
+.live-cartela-card .cartela-cell{display:grid;place-items:center;width:100%;min-width:0;min-height:0;aspect-ratio:1;padding:0;border:1px solid #392653;border-radius:4px;background:#21153b;color:#fff;font-size:clamp(7px,2.5vw,11px);font-weight:850;line-height:1;appearance:none;-webkit-appearance:none;cursor:pointer;user-select:none;transition:background .15s ease,transform .08s ease}
+.live-cartela-card .cartela-cell:active{transform:scale(.92)}
+.live-cartela-card .cartela-cell.marked{border-color:#12bd80;background:#10b981;color:#fff}
+.live-cartela-card .cartela-cell.free{background:#10b981;color:#000}
+.live-cartela-card .cartela-cell.win-cell{border-color:#ffd75b;background:#f59e0b;color:#120b17}
+.live-cartela-card .cartela-cell:disabled{cursor:default;opacity:1}
+.live-cartela-card .cartela-cell.invalid-click{animation:shake .3s ease;border-color:#ef4444;background:#7f1d1d}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
+.live-spectator-card{display:grid;align-content:center;justify-items:center;flex:1;gap:7px;border:1px solid #342451;border-radius:10px;background:#160c2e;text-align:center}.live-spectator-card>span{font-size:22px}.live-spectator-card>strong{font-size:11px}.live-spectator-card>small{padding:0 8px;color:#aa9bbd;font-size:8px}
+.btn-bingo{width:100%;min-height:42px;border:1px solid #392d51;border-radius:12px;background:#1c142e;color:#55466d;font-size:14px;font-weight:950;cursor:not-allowed;transition:all .2s}
+.btn-bingo.active-yellow{border-color:#f7c633;background:linear-gradient(90deg,#f59e0b,#eab308);color:#000;cursor:pointer;box-shadow:0 0 14px #f59e0b99;animation:pulse-glow 1.2s infinite alternate}
+.btn-bingo:disabled{opacity:1}
+.btn-bingo-action{pointer-events:auto}.btn-bingo-action>*{pointer-events:none}.btn-bingo-action.active-yellow{cursor:pointer}
+.live-game-footer{display:grid;grid-template-columns:1fr 1fr;gap:7px;min-height:48px;padding:7px 5px calc(4px + env(safe-area-inset-bottom));border-top:1px solid #28174a;background:#120923}
+.live-game-footer button{min-height:34px;border:1px solid #312143;border-radius:12px;font-size:9px;font-weight:850}
+.live-game-footer .footer-leave{background:#46132b;color:#e4acbd}.live-game-footer .footer-refresh{background:#24215a;color:#c1c9ff}
+@keyframes pulse-glow{to{box-shadow:0 0 22px #f59e0bcc;filter:brightness(1.12)}}
+.winner-celebration{display:grid;align-content:center;justify-items:center;gap:8px;width:min(100%,430px);height:100dvh;min-height:100dvh;margin:0 auto;padding:calc(14px + env(safe-area-inset-top)) 18px calc(12px + env(safe-area-inset-bottom));overflow:hidden;border:1px solid #e3b938;border-radius:24px;background:#211033;box-shadow:0 0 35px #edbe3570;text-align:center}
+.winner-app-shell{width:100%;height:100dvh;min-height:100dvh;overflow:hidden;padding:0;background:#0f0920}
+.winner-app-shell>.content{height:100%;overflow:hidden;padding:0}
+.winner-app-shell .winner-celebration{height:100%;min-height:0}
+.winner-glow{position:absolute;inset:0;z-index:0;pointer-events:none;background:radial-gradient(ellipse at 50% 47%,#f8ba2415 0,transparent 60%)}
+.winner-celebration>*:not(.winner-glow){z-index:1}.winner-celebration .winner-trophy{font-size:36px}.winner-celebration h1{font-size:30px}.winner-subtitle{font-size:12px}
+.winner-pot{color:#f6c62e;font-size:14px;font-weight:900;text-shadow:0 0 12px #f6c62e55}
+.winner-list{max-height:18dvh;overflow:auto;scrollbar-width:thin}
+.winner-list>div{grid-template-columns:1fr auto;align-items:center;padding:7px 10px;border-color:#48335d;background:#2a1b3d}
+.winner-list>div>b{color:#f7f0ff;font-size:11px;text-align:left}.winner-list>div>span{padding:4px 6px;border-radius:7px;background:#170d2c;color:#e7c64f;font-size:9px;font-weight:900}
+.winner-card-section{width:100%;max-width:320px;padding:7px;background:#10081d}
+.winner-card-title{margin-bottom:5px;font-size:8px}
+.winner-player-grid{grid-template-rows:repeat(6,minmax(30px,1fr));gap:3px}
+.winner-player-grid>b{font-size:9px}.winner-player-grid>span{min-height:30px;font-size:10px}
+.winner-player-grid>span.marked{border-color:#15bd7e;background:#10b981;color:#fff}.winner-player-grid>span.free{background:#10b981;color:#000}.winner-player-grid>span.winning-cell{background:#f59e0b!important;color:#000!important;box-shadow:0 0 9px #f59e0b99}
+.winner-verified{color:#50e6a7;font-size:10px;font-weight:850}.winner-countdown{margin:0;color:#a99bb8;font-size:10px}
+@media(max-height:680px){.game-app-shell .live-game{gap:4px}.live-game-header{min-height:29px}.live-game-hud{padding:4px 6px}.live-play-arena{gap:5px}.live-call-strip{min-height:50px}.live-current-call strong{width:37px;height:37px;font-size:12px}.live-recent-calls .recent-ball{width:29px;height:29px}.live-controls{gap:3px}.auto-toggle,.sound-toggle{min-height:26px}.live-game-footer{min-height:40px;padding-top:4px}.live-game-footer button{min-height:29px}.winner-celebration{gap:5px}.winner-card-section{padding:5px}.winner-player-grid{grid-template-rows:repeat(6,minmax(25px,1fr))}.winner-player-grid>span{min-height:25px}.winner-list{max-height:14dvh}}
+@media(max-width:350px){.live-play-arena{grid-template-columns:minmax(0,.68fr) minmax(0,1.32fr);gap:4px}.live-game-hud{gap:3px;padding-right:4px;padding-left:4px}.live-game-hud small{font-size:7px}.live-game-hud b{font-size:9px}.master-cell{font-size:7px}.live-cartela-card{padding:2px}.mini-card-title{font-size:8px}}
+.play-screen .room-list{grid-template-columns:minmax(0,1fr);gap:12px}
+.play-screen .stake-entry-card{display:grid;gap:14px;margin:0 4px;padding:16px;border:1px solid #8b641d;border-radius:18px;background:#140a28;box-shadow:none}
+.stake-header-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;margin:0}
+.stake-icon-badge{width:52px;height:52px;border:1px solid #f59e0b;border-radius:14px;background:#231242;font-size:24px}
+.stake-info-text{gap:3px}
+.stake-info-text h3{overflow:visible!important;color:#fff!important;font-size:18px!important;font-weight:800;white-space:nowrap}
+.stake-info-text h3 span{color:#f59e0b}
+.stake-info-text small{color:#a99bc2;font-size:11px;white-space:normal}
+.btn-enter-game{display:flex;align-items:center;justify-content:center;gap:6px;min-width:0;min-height:44px;padding:10px 15px;border-radius:22px;background:#facc32;color:#090510;font-size:14px;font-weight:850;box-shadow:0 0 12px #f59e0b66;white-space:nowrap}
+.btn-enter-game>span{font-size:14px}
+.stake-metrics-row{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}
+.stake-metrics-row .metric-box{display:grid;min-width:0;min-height:76px;align-content:center;justify-items:center;gap:4px;padding:8px 4px;border:1px solid #2b1850;border-radius:12px;background:#1b0d36;text-align:center}
+.stake-metrics-row .metric-value{display:flex;align-items:center;justify-content:center;gap:4px;color:#f6f0ff;font-size:13px;font-weight:800;line-height:1.2;white-space:nowrap}
+.stake-metrics-row .metric-label{margin:0;color:#9d8dbd;font-size:9px;font-weight:700;letter-spacing:.03em;line-height:1.2}
+.stake-metrics-row .room-status-selecting{color:#f4c54f}
+.stake-metrics-row .room-status-playing{color:#82b8ff}
+.play-screen .play-smart-pill{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:76px;margin:0;padding:12px;border:1px solid #392451;border-radius:14px;background:#1b0d36}
+.play-smart-pill h2{margin:0 0 4px;color:#facc15;font-size:13px}
+.play-smart-pill p{margin:0;color:#b9aacc;font-size:11px;line-height:1.4}
+.play-smart-pill>span{font-size:24px}
+@media(max-width:370px){.play-screen .stake-entry-card{gap:10px;margin:0 2px;padding:12px}.stake-header-row{gap:7px}.stake-icon-badge{width:42px;height:42px;font-size:20px}.stake-info-text h3{font-size:15px!important}.stake-info-text small{font-size:9px}.btn-enter-game{min-height:38px;padding:8px 10px;font-size:11px}.stake-metrics-row{gap:5px}.stake-metrics-row .metric-box{min-height:66px}.stake-metrics-row .metric-value{font-size:11px}.stake-metrics-row .metric-label{font-size:7px}.play-screen .play-smart-pill{min-height:64px;padding:9px}.play-smart-pill h2{font-size:11px}.play-smart-pill p{font-size:9px}}
 `;
 
-createRoot(document.getElementById('root')).render(<App />);
+createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);
