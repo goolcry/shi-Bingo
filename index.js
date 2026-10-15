@@ -3328,6 +3328,8 @@ app.get('/mini-app.js', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'mini-app.js'));
 });
 
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+
 app.use((error, _req, res, _next) => {
   console.error(JSON.stringify({
     event: 'request_failed',

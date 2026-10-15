@@ -24,18 +24,30 @@ const telegramWebApp = () => window.Telegram?.WebApp;
 const MAX_CARTELAS_PER_PLAYER = 2;
 let audioUnlocked = false;
 let audioUnlockInFlight = false;
+const callAudio = new Audio();
+callAudio.preload = 'auto';
+callAudio.playsInline = true;
 function unlockAudio() {
   if (audioUnlocked || audioUnlockInFlight) return;
   audioUnlockInFlight = true;
-  const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-  silentAudio.volume = 0;
-  silentAudio.play().then(() => {
+  callAudio.volume = 0;
+  callAudio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+  callAudio.play().then(() => {
     audioUnlocked = true;
+    callAudio.pause();
+    callAudio.currentTime = 0;
+    callAudio.removeAttribute('src');
+    callAudio.load();
+    callAudio.volume = 1;
     document.removeEventListener('click', unlockAudio);
     document.removeEventListener('touchstart', unlockAudio);
-  }).catch(() => {
+  }).catch((error) => {
+    callAudio.pause();
+    callAudio.removeAttribute('src');
+    callAudio.load();
+    callAudio.volume = 1;
     audioUnlockInFlight = false;
-    silentAudio.pause();
+    console.warn('[Audio unlock failed]:', error.message);
   });
 }
 document.addEventListener('click', unlockAudio);
@@ -138,7 +150,8 @@ const words = {
     gameRound: 'ROOM', playersCount: 'PLAYERS', stakeLabel: 'STAKE', freeSpace: 'Free space',
     gameOver: 'GAME OVER', winnerHeadline: 'BINGO!', multiWinners: '{count} players won! 🎉',
     singleWinner: 'We have a winner! 🎉', noWinner: 'The game ended without a winning cartela.',
-    winningCartela: 'WINNING CARTELA #{number}', calls: 'CALLS', verified: '✓ Verified',
+    bingoClaimReceived: 'BINGO CLAIM RECEIVED', bingoClaimReviewing: 'Your cartela is shown while the server verifies the claim and finalizes any simultaneous winners. Prize details will appear after verification.',
+    winningCartela: 'WINNING CARTELA #{number}', claimedCartela: 'CLAIMED CARTELA #{number}', calls: 'CALLS', verified: '✓ Verified',
     nextRound: 'Next round in {seconds}s...', playerProfile: 'PLAYER PROFILE',
     gamesWon: 'Games won', winnings: 'Winnings', winRate: 'Win rate', referrals: 'Referrals',
     successfulReferrals: 'Successful referrals:',
@@ -197,7 +210,8 @@ const words = {
     gameRound: 'ክፍል', playersCount: 'ተጫዋቾች', stakeLabel: 'ውርርድ', freeSpace: 'ነፃ ቦታ',
     gameOver: 'ጨዋታው ተጠናቋል', winnerHeadline: 'ቢንጎ!', multiWinners: '{count} ተጫዋቾች አሸንፈዋል! 🎉',
     singleWinner: 'አሸናፊ አለን! 🎉', noWinner: 'አሸናፊ ካርቴላ ሳይኖር ጨዋታው ተጠናቋል።',
-    winningCartela: 'አሸናፊ ካርቴላ #{number}', calls: 'ጥሪዎች', verified: '✓ ተረጋግጧል',
+    bingoClaimReceived: 'የቢንጎ ጥያቄ ደርሷል', bingoClaimReviewing: 'አገልጋዩ ጥያቄውን እና በአንድ ጊዜ የቀረቡ ጥያቄዎችን እያረጋገጠ ነው። ሽልማቱ ከማረጋገጫ በኋላ ይታያል።',
+    winningCartela: 'አሸናፊ ካርቴላ #{number}', claimedCartela: 'የቀረበው ካርቴላ #{number}', calls: 'ጥሪዎች', verified: '✓ ተረጋግጧል',
     nextRound: 'ቀጣዩ ዙር በ{seconds} ሰከንድ...', playerProfile: 'የተጫዋች መገለጫ',
     gamesWon: 'ያሸነፉ ጨዋታዎች', winnings: 'ያሸነፉት', winRate: 'የማሸነፍ መጠን', referrals: 'ግብዣዎች',
     inviteCopied: 'የግብዣ አገናኙ ተቀድቷል።', successfulReferrals: 'የተሳኩ ግብዣዎች:',
@@ -267,6 +281,7 @@ function App() {
   const t = words[lang];
   const [user, setUser] = useState(null);
   const [wallet, setWallet] = useState(null);
+  const callAudioRef = useRef(callAudio);
   const [rooms, setRooms] = useState([]);
   const [myRoomId, setMyRoomId] = useState(null);
   const [roomsLoading, setRoomsLoading] = useState(true);
@@ -274,9 +289,11 @@ function App() {
   const [room, setRoom] = useState(null);
   const roomStateRevision = useRef(0);
   const roomSessionRevision = useRef(0);
+  const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
   const activeSelectionMutations = useRef(0);
   const [game, setGame] = useState(null);
+  const [pendingBingoClaim, setPendingBingoClaim] = useState(null);
   const lastGameCall = useRef({ roomId: null, number: null });
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
@@ -326,6 +343,76 @@ function App() {
     setView(['PLAYING', 'VERIFYING'].includes(data.room.status) ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
     return data;
   }, [request]);
+
+  function submitBingoClaim(numbers, cartelaNumber, claimedNumbers) {
+    if (!room?.id || !numbers.length) throw new Error('No winning cartela is available to claim.');
+    const roomId = String(room.id);
+    claimRequestInFlight.current = true;
+    setPendingBingoClaim({ roomId, cartelaNumber: Number(cartelaNumber ?? numbers[0]) });
+    setGame((current) => current ? {
+      ...current,
+      calledNumbers: claimedNumbers,
+      currentNumber: claimedNumbers.at(-1) ?? current.currentNumber,
+      callIndex: claimedNumbers.length,
+    } : current);
+    setRoom((current) => current && String(current.id) === roomId
+      ? { ...current, status: 'VERIFYING' }
+      : current);
+    setView('winner');
+    setBusy(true);
+
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    const submit = async () => {
+      try {
+        const result = await request(`/api/rooms/${encodeURIComponent(roomId)}/bingo`, {
+          method: 'POST',
+          body: {},
+          signal: controller.signal,
+        });
+        if (result.success !== true || result.accepted !== true) {
+          throw new Error(result.error || 'Bingo claim was not accepted.');
+        }
+      } catch (reason) {
+        console.warn('[Bingo claim failed]:', reason);
+        const refreshController = new AbortController();
+        const refreshTimeout = window.setTimeout(() => refreshController.abort(), 2500);
+        try {
+          const requestStartedAt = Date.now();
+          const latest = await request(`/api/rooms/${encodeURIComponent(roomId)}/state`, {
+            signal: refreshController.signal,
+          });
+          setRoom(withRoomClock(latest.room));
+          setGame(gameWithClockOffset(latest.game, requestStartedAt));
+          if (latest.room.status === 'FINISHED') {
+            setPendingBingoClaim(null);
+            setView('winner');
+          } else if (reason.status && reason.status < 500) {
+            setPendingBingoClaim(null);
+            setView('game');
+            const telegram = telegramWebApp();
+            if (telegram?.showAlert) telegram.showAlert(reason.message || 'Bingo verification failed.');
+            else window.alert(reason.message || 'Bingo verification failed.');
+          } else if (latest.room.status !== 'VERIFYING') {
+            setPendingBingoClaim(null);
+            setView('game');
+            const telegram = telegramWebApp();
+            if (telegram?.showAlert) telegram.showAlert(reason.message || 'Bingo verification failed.');
+            else window.alert(reason.message || 'Bingo verification failed.');
+          }
+        } catch (refreshError) {
+          console.warn('[Bingo claim state refresh failed]:', refreshError);
+        } finally {
+          window.clearTimeout(refreshTimeout);
+        }
+      } finally {
+        claimRequestInFlight.current = false;
+        window.clearTimeout(timeout);
+        setBusy(false);
+      }
+    };
+    void submit();
+  }
 
   useEffect(() => {
     let active = true;
@@ -459,7 +546,8 @@ function App() {
   }, [initData, refreshWallet]);
 
   useEffect(() => {
-    if (!room?.id || !['cartelas', 'waiting', 'game'].includes(view)) return undefined;
+    if (!room?.id || (!['cartelas', 'waiting', 'game'].includes(view)
+      && !(view === 'winner' && pendingBingoClaim))) return undefined;
     let active = true;
     const update = async () => {
       const revision = roomStateRevision.current;
@@ -478,8 +566,17 @@ function App() {
         setRoom(withRoomClock(data.room));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
-        if (['PLAYING', 'VERIFYING'].includes(data.room.status)) setView('game');
-        if (data.room.status === 'FINISHED') setView('winner');
+        if (data.room.status === 'FINISHED') {
+          setPendingBingoClaim(null);
+          setView('winner');
+        } else if (pendingBingoClaim?.roomId === String(room.id)) {
+          if (data.room.status === 'PLAYING' && !claimRequestInFlight.current) {
+            setPendingBingoClaim(null);
+            setView('game');
+          }
+        } else if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
+          setView('game');
+        }
       } catch (reason) {
         if (active) console.warn('[Polling tick skipped]:', reason);
       }
@@ -487,7 +584,7 @@ function App() {
     update();
     const timer = window.setInterval(update, 1500);
     return () => { active = false; window.clearInterval(timer); };
-  }, [room?.id, view, request]);
+  }, [room?.id, view, pendingBingoClaim, request]);
 
   useEffect(() => {
     let active = true;
@@ -733,42 +830,8 @@ function App() {
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
       {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
-      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={async (numbers) => {
-        setBusy(true);
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 10000);
-        try {
-          if (!numbers.length) throw new Error('No winning cartela is available to claim.');
-          const result = await request(`/api/rooms/${room.id}/bingo`, {
-            method: 'POST',
-            body: {},
-            signal: controller.signal,
-          });
-          if (result.success !== true || result.accepted !== true) {
-            throw new Error(result.error || 'Bingo claim was not accepted.');
-          }
-          setRoom((current) => current && String(current.id) === String(room.id)
-            ? { ...current, status: result.status || 'VERIFYING' }
-            : current);
-        } catch (reason) {
-          console.warn('[Bingo claim failed]:', reason);
-          const refreshController = new AbortController();
-          const refreshTimeout = window.setTimeout(() => refreshController.abort(), 2500);
-          try {
-            const latest = await loadRoom(room.id, roomSessionRevision.current, refreshController.signal);
-            if (['VERIFYING', 'FINISHED'].includes(latest.room.status)) return;
-          } catch (refreshError) {
-            console.warn('[Bingo claim state refresh failed]:', refreshError);
-          } finally {
-            window.clearTimeout(refreshTimeout);
-          }
-          throw reason;
-        } finally {
-          window.clearTimeout(timeout);
-          setBusy(false);
-        }
-      }} /></ErrorBoundary>}
-      {view === 'winner' && <WinnerScreen game={game} room={room} t={t} onNextRound={advanceToNextRound} />}
+      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
+      {view === 'winner' && <WinnerScreen game={game} room={room} t={t} claimPending={Boolean(pendingBingoClaim)} pendingCartelaNumber={pendingBingoClaim?.cartelaNumber} onNextRound={advanceToNextRound} />}
       {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
       {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
@@ -1038,7 +1101,7 @@ function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh
   </>;
 }
 
-function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBingo }) {
+function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefresh, onBingo }) {
   const [autoMark, setAutoMark] = useState(true);
   const [isClaiming, setIsClaiming] = useState(false);
   const claimInFlight = useRef(false);
@@ -1050,46 +1113,14 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
   const [manualMarks, setManualMarks] = useState({});
   const [invalidCells, setInvalidCells] = useState({});
   const [claimPaused, setClaimPaused] = useState(false);
-  const myCards = (Array.isArray(room?.cartelas) ? room.cartelas : [])
-    .filter((card) => card && card.state === 'MINE');
+  const myCards = useMemo(
+    () => (Array.isArray(room?.cartelas) ? room.cartelas : []).filter((card) => card && card.state === 'MINE'),
+    [room?.cartelas],
+  );
   const syncRef = useRef({ offset: 0 });
-  const activeAudioRef = useRef(null);
-  const audioUnlockedRef = useRef(false);
-  useEffect(() => {
-    const audio = new Audio();
-    audio.preload = 'auto';
-    activeAudioRef.current = audio;
-    return () => {
-      audio.pause();
-      audio.removeAttribute('src');
-      audio.load();
-      if (activeAudioRef.current === audio) activeAudioRef.current = null;
-    };
-  }, []);
-  useEffect(() => {
-    const unlockAudio = () => {
-      const audio = activeAudioRef.current;
-      if (audioUnlockedRef.current || !audio) return;
-      audio.src = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-      audio.play().then(() => {
-        audioUnlockedRef.current = true;
-        audio.pause();
-        audio.currentTime = 0;
-        audio.removeAttribute('src');
-        audio.load();
-        window.removeEventListener('touchstart', unlockAudio);
-        window.removeEventListener('click', unlockAudio);
-      }).catch((error) => {
-        console.warn('[Audio unlock failed]:', error.message);
-      });
-    };
-    window.addEventListener('touchstart', unlockAudio, { passive: true });
-    window.addEventListener('click', unlockAudio);
-    return () => {
-      window.removeEventListener('touchstart', unlockAudio);
-      window.removeEventListener('click', unlockAudio);
-    };
-  }, []);
+  const activeAudioRef = audioRef;
+  const callTimerRef = useRef(null);
+  const frozenNumbersRef = useRef(null);
   useEffect(() => {
     if (game?.serverNow && game?.startedAt) {
       syncRef.current.offset = Number(game.clientClockOffset ?? (Number(game.serverNow) - Date.now()));
@@ -1097,12 +1128,15 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
   }, [game?.serverNow, game?.startedAt, game?.clientClockOffset]);
   useEffect(() => {
     const timer = window.setInterval(() => setClockTick(Date.now()), 50);
-    return () => window.clearInterval(timer);
+    callTimerRef.current = timer;
+    return () => {
+      window.clearInterval(timer);
+      if (callTimerRef.current === timer) callTimerRef.current = null;
+    };
   }, []);
-  const calledNumbers = parseNumberList(game?.calledNumbers);
-  const serverCalledSet = useMemo(() => new Set(calledNumbers), [calledNumbers]);
+  const calledNumbers = useMemo(() => parseNumberList(game?.calledNumbers), [game?.calledNumbers]);
   const rawDrawOrder = game?.drawOrder ?? game?.draw_order ?? room?.draw_order;
-  const drawOrder = parseNumberList(rawDrawOrder);
+  const drawOrder = useMemo(() => parseNumberList(rawDrawOrder), [rawDrawOrder]);
   const intervalMs = Number(game?.callIntervalMs || Number(game?.callIntervalSeconds || 4) * 1000);
   const startedAtValue = game?.startedAt ?? game?.started_at ?? room?.startedAt ?? room?.started_at;
   const startedAt = startedAtValue == null ? null : Number(startedAtValue);
@@ -1112,11 +1146,12 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
     ? Math.min(drawOrder.length, Math.floor(Math.max(0, clockTick + syncRef.current.offset - startedAt) / intervalMs))
     : 0;
   const callsAreFrozen = room?.status === 'VERIFYING' || claimPaused || isClaiming;
-  const displayedNumbers = callsAreFrozen
-    ? calledNumbers
-    : drawOrder.length
-    ? drawOrder.slice(0, Math.min(drawOrder.length, Math.max(calledNumbers.length, scheduledCount)))
-    : calledNumbers;
+  const displayedNumbers = useMemo(() => {
+    if (callsAreFrozen) return frozenNumbersRef.current || calledNumbers;
+    return drawOrder.length
+      ? drawOrder.slice(0, Math.min(drawOrder.length, Math.max(calledNumbers.length, scheduledCount)))
+      : calledNumbers;
+  }, [callsAreFrozen, calledNumbers, drawOrder, scheduledCount]);
   const displayedCalledSet = useMemo(() => new Set(displayedNumbers.map(Number)), [displayedNumbers]);
   const recent = displayedNumbers.slice(-2).reverse();
   const currentNumber = displayedNumbers.at(-1) ?? parseNumberList([game?.currentNumber])[0] ?? null;
@@ -1124,7 +1159,17 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
   const markedNumbersFor = (card) => autoMark
     ? displayedCalledSet
     : new Set(manualMarks[card.number] || []);
-  const claimableCards = myCards.filter((card) => winningPatternForCard(card.numbers, serverCalledSet));
+  const winningCardNumber = useMemo(() => {
+    for (const card of myCards) {
+      if (winningPatternForCard(card.numbers, displayedCalledSet)) return Number(card.number);
+    }
+    return null;
+  }, [myCards, displayedCalledSet]);
+  const isBingoReady = winningCardNumber !== null;
+  const claimableCards = useMemo(
+    () => myCards.filter((card) => winningPatternForCard(card.numbers, displayedCalledSet)),
+    [myCards, displayedCalledSet],
+  );
   const isSpectator = !myCards.length;
   const previousCall = useRef(null);
   useEffect(() => {
@@ -1237,15 +1282,26 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
     });
   };
   const handleBingoClaim = async () => {
-    if (!claimableCards.length || isClaiming || claimInFlight.current) return;
+    if (!isBingoReady || !claimableCards.length || isClaiming || claimInFlight.current) return;
     claimInFlight.current = true;
     setIsClaiming(true);
+    frozenNumbersRef.current = displayedNumbers;
     setClaimPaused(true);
+    if (callTimerRef.current !== null) {
+      window.clearInterval(callTimerRef.current);
+      callTimerRef.current = null;
+    }
     telegramWebApp()?.HapticFeedback?.notificationOccurred?.('success');
     try {
-      await onBingo(claimableCards.map((card) => card.number));
+      await onBingo(claimableCards.map((card) => card.number), winningCardNumber, displayedNumbers);
     } catch (error) {
       console.error('[Bingo claim error]:', error);
+      frozenNumbersRef.current = null;
+      setClaimPaused(false);
+      if (callTimerRef.current === null) {
+        const timer = window.setInterval(() => setClockTick(Date.now()), 50);
+        callTimerRef.current = timer;
+      }
       const message = error.message || 'Error claiming Bingo.';
       const telegram = telegramWebApp();
       if (telegram?.showAlert) telegram.showAlert(message);
@@ -1253,7 +1309,6 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
     } finally {
       claimInFlight.current = false;
       setIsClaiming(false);
-      if (room.status !== 'VERIFYING') setClaimPaused(false);
     }
   };
   return <section className="live-game">
@@ -1320,8 +1375,8 @@ function GameScreen({ room, game, t, calledSet, busy, onLeave, onRefresh, onBing
             </article>)}
           </div>}
         {!isSpectator && <button
-          className={`btn-bingo btn-bingo-action ${claimableCards.length ? 'active-yellow' : ''}`}
-          disabled={busy || isClaiming || room.status === 'VERIFYING' || !claimableCards.length}
+          className={`btn-bingo btn-bingo-action ${isBingoReady ? 'active-yellow' : ''}`}
+          disabled={busy || isClaiming || room.status === 'VERIFYING' || !isBingoReady}
           onClick={handleBingoClaim}
         >{isClaiming || room.status === 'VERIFYING' ? t.claimingBingo : t.bingo}</button>}
       </section>
@@ -1350,6 +1405,7 @@ function CardNumbers({ numbers, cardNumber, t, calledSet, interactive = false, i
 }
 
 function winningPatternForCard(numbers = [], calledSet = new Set()) {
+  if (!Array.isArray(numbers) || numbers.length !== 25) return null;
   const marked = numbers.map((value) => value === 'FREE' || calledSet.has(Number(value)));
   for (let row = 0; row < 5; row += 1) {
     const indexes = Array.from({ length: 5 }, (_, column) => row * 5 + column);
@@ -1373,21 +1429,27 @@ function bingoLabel(number) {
   return `${n <= 15 ? 'B' : n <= 30 ? 'I' : n <= 45 ? 'N' : n <= 60 ? 'G' : 'O'}-${n}`;
 }
 
-function WinnerScreen({ game, room, t, onNextRound }) {
+function WinnerScreen({ game, room, t, claimPending = false, pendingCartelaNumber, onNextRound }) {
   const [seconds, setSeconds] = useState(7);
   const remainingSeconds = useRef(7);
   const nextRoundRef = useRef(onNextRound);
   const winners = game?.winners || [];
   const winner = winners[0];
   const winnerPlayerCount = new Set(winners.map((item) => item.userId)).size;
-  const winningCard = winner && room?.cartelas?.find((card) => card.number === winner.cartelaNumber);
+  const winningCartelaNumber = pendingCartelaNumber ?? winner?.cartelaNumber;
+  const winningCard = winningCartelaNumber != null
+    ? room?.cartelas?.find((card) => Number(card.number) === Number(winningCartelaNumber))
+    : null;
   const winnerCalledNumbers = parseNumberList(game?.calledNumbers);
   const called = new Set(winnerCalledNumbers);
-  const highlighted = winner && winningCard
+  const highlighted = winningCard
     ? winningPatternForCard(winningCard.numbers, called)
     : null;
   useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
   useEffect(() => {
+    if (claimPending) return undefined;
+    remainingSeconds.current = 7;
+    setSeconds(7);
     const timer = window.setInterval(() => {
       remainingSeconds.current -= 1;
       setSeconds(remainingSeconds.current);
@@ -1397,22 +1459,24 @@ function WinnerScreen({ game, room, t, onNextRound }) {
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, []);
-  return <section className={`winner-celebration ${winners.length ? 'has-winner' : ''}`}>
+  }, [claimPending]);
+  return <section className={`winner-celebration ${claimPending ? 'claim-pending' : ''} ${winners.length ? 'has-winner' : ''}`}>
     <div className="winner-glow" aria-hidden="true" />
-    <div className="winner-trophy">{winners.length ? '👑' : '🎱'}</div>
+    <div className="winner-trophy">{claimPending ? '⏳' : winners.length ? '👑' : '🎱'}</div>
     <div className="eyebrow">SHISHO BINGO · {t.roomNumber.replace('{number}', room?.roomNumber || room?.id || '—')}</div>
-    <h1>{winners.length ? t.winnerHeadline : t.gameOver}</h1>
-    <p className="winner-subtitle">{winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
-    <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool ?? winner?.prize))}</div>
-    {winners.length > 0 && <div className="winner-list">
+    <h1>{claimPending ? t.bingoClaimReceived : winners.length ? t.winnerHeadline : t.gameOver}</h1>
+    <p className="winner-subtitle">{claimPending
+      ? t.bingoClaimReviewing
+      : winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
+    {!claimPending && <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool ?? winner?.prize))}</div>}
+    {!claimPending && winners.length > 0 && <div className="winner-list">
       {winners.map((item) => <div key={`${item.userId}-${item.cartelaNumber}`}>
         <b>👑 {item.username ? `@${item.username}` : item.displayName}</b>
         <span>#{item.cartelaNumber}</span>
       </div>)}
     </div>}
     {winningCard && <section className="winner-card-section">
-      <div className="winner-card-title"><span>{t.winningCartela.replace('{number}', winningCard.number)}</span><small>{game?.callIndex || winnerCalledNumbers.length} {t.calls}</small></div>
+      <div className="winner-card-title"><span>{(claimPending ? t.claimedCartela : t.winningCartela).replace('{number}', winningCard.number)}</span><small>{game?.callIndex || winnerCalledNumbers.length} {t.calls}</small></div>
       <div className="player-grid winner-player-grid">
         {['B', 'I', 'N', 'G', 'O'].map((letter) => <b key={`winner-${letter}`}>{letter}</b>)}
         {winningCard.numbers.map((value, index) => <span key={index}
@@ -1421,8 +1485,8 @@ function WinnerScreen({ game, room, t, onNextRound }) {
         </span>)}
       </div>
     </section>}
-    {winner && <div className="winner-verified">{t.verified}</div>}
-    <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>
+    {!claimPending && winner && <div className="winner-verified">{t.verified}</div>}
+    {!claimPending && <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>}
   </section>;
 }
 
