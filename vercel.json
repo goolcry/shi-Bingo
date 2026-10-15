@@ -1,5 +1,24 @@
 {
   "buildCommand": "npm run build",
+  "headers": [
+    {
+      "source": "/audio/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=86400"
+        },
+        {
+          "key": "Content-Type",
+          "value": "audio/mpeg"
+        },
+        {
+          "key": "Accept-Ranges",
+          "value": "bytes"
+        }
+      ]
+    }
+  ],
   "crons": [
     {
       "path": "/api/cron/rooms",

@@ -1794,6 +1794,36 @@ async function settleRoom(connection, roomId, calledNumbers) {
   return true;
 }
 
+async function roomWinnerResults(executor, roomId) {
+  const [winners] = await executor.execute(
+    `SELECT w.telegram_id, u.first_name, u.username, w.cartela_number, w.pattern, w.prize, s.numbers
+     FROM game_winners w
+     JOIN users u ON u.telegram_id = w.telegram_id
+     JOIN cartela_slots s ON s.room_id = w.room_id AND s.cartela_number = w.cartela_number
+     WHERE w.room_id = ?
+     ORDER BY w.id`,
+    [roomId],
+  );
+  return winners.map((winner) => ({
+    userId: String(winner.telegram_id),
+    name: winner.first_name,
+    displayName: winner.first_name,
+    username: winner.username,
+    cartelaNumber: Number(winner.cartela_number),
+    pattern: winner.pattern,
+    prize: formatAmount(winner.prize),
+    winningGrid: parseCartela(winner.numbers),
+  }));
+}
+
+async function roomFinishedAt(executor, roomId) {
+  const [[result]] = await executor.execute(
+    'SELECT UNIX_TIMESTAMP(finished_at) * 1000 AS finished_at_ms FROM bingo_rooms WHERE id = ?',
+    [roomId],
+  );
+  return result?.finished_at_ms == null ? null : Number(result.finished_at_ms);
+}
+
 async function advanceRoomGame(roomId) {
   const connection = await pool.getConnection();
   try {
@@ -2010,12 +2040,7 @@ async function roomSnapshot(roomId, telegramId) {
     [roomId],
   );
   const reservationCounts = await countValidReservations(pool, roomId);
-  const [winners] = await pool.execute(
-    `SELECT w.telegram_id, u.first_name, u.username, w.cartela_number, w.pattern, w.prize
-     FROM game_winners w JOIN users u ON u.telegram_id = w.telegram_id
-     WHERE w.room_id = ? ORDER BY w.id`,
-    [roomId],
-  );
+  const winners = await roomWinnerResults(pool, roomId);
   const [[selection]] = await pool.execute(
     `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0.00) AS total_cost
      FROM cartela_reservations
@@ -2068,7 +2093,10 @@ async function roomSnapshot(roomId, telegramId) {
       },
       cartelas,
     },
+    winner: winners[0] || null,
+    winners,
     game: {
+      status: room.status,
       calledNumbers,
       currentNumber,
       currentLetter: currentNumber == null ? null : (currentNumber <= 15 ? 'B' : currentNumber <= 30 ? 'I' : currentNumber <= 45 ? 'N' : currentNumber <= 60 ? 'G' : 'O'),
@@ -2081,14 +2109,7 @@ async function roomSnapshot(roomId, telegramId) {
       callIntervalMs: (Number.isInteger(configuredInterval) && configuredInterval >= 1 && configuredInterval <= 3600
         ? configuredInterval : 4) * 1000,
       drawOrder: parseDrawOrder(room.draw_order, calledNumbers),
-      winners: winners.map((winner) => ({
-        userId: String(winner.telegram_id),
-        displayName: winner.first_name,
-        username: winner.username,
-        cartelaNumber: Number(winner.cartela_number),
-        pattern: winner.pattern,
-        prize: formatAmount(winner.prize),
-      })),
+      winners,
       recentActivity: calledNumbers.slice(-3).reverse().map((number, index) => ({
         callIndex: calledNumbers.length - index,
         number,
@@ -2599,6 +2620,32 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
     const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [req.params.id]);
     const room = rooms[0];
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
+    if (room.status === 'FINISHED') {
+      const winners = await roomWinnerResults(connection, req.params.id);
+      const isWinner = winners.some((winner) => winner.userId === String(req.telegramUser.id));
+      const finishedAt = await roomFinishedAt(connection, req.params.id);
+      const [calls] = await connection.execute(
+        'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
+        [req.params.id],
+      );
+      await connection.commit();
+      if (!isWinner) {
+        throw Object.assign(new Error('This game is no longer accepting Bingo claims.'), {
+          status: 409,
+          code: 'GAME_NOT_PLAYING',
+        });
+      }
+      return res.json({
+        success: true,
+        bingo: true,
+        accepted: true,
+        status: 'FINISHED',
+        winner: winners[0] || null,
+        winners,
+        calledNumbers: calls.map((call) => Number(call.number)),
+        finishedAt,
+      });
+    }
     if (!['PLAYING', 'VERIFYING'].includes(room.status)) {
       throw Object.assign(new Error('This game is no longer accepting Bingo claims.'), { status: 409, code: 'GAME_NOT_PLAYING' });
     }
@@ -2640,22 +2687,19 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
         [req.params.id, String(req.telegramUser.id), claim.number, claim.pattern, calledNumbers.length],
       );
     }
-    if (room.status === 'PLAYING' && !room.claim_deadline) {
-      await connection.execute(
-        `UPDATE bingo_rooms
-         SET status = 'VERIFYING', claim_deadline = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 3 SECOND)
-         WHERE id = ? AND status = 'PLAYING'`,
-        [req.params.id],
-      );
-    }
+    await settleRoom(connection, req.params.id, calledNumbers);
+    const winners = await roomWinnerResults(connection, req.params.id);
+    const finishedAt = await roomFinishedAt(connection, req.params.id);
     await connection.commit();
     res.json({
       success: true,
       bingo: true,
       accepted: true,
-      status: 'VERIFYING',
-      winningCartelas: validClaims.map((claim) => ({ number: claim.number, pattern: claim.pattern })),
-      claimWindowSeconds: 3,
+      status: 'FINISHED',
+      winner: winners[0] || null,
+      winners,
+      calledNumbers,
+      finishedAt,
     });
   } catch (error) {
     await connection.rollback().catch(() => {});
@@ -3328,7 +3372,20 @@ app.get('/mini-app.js', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'mini-app.js'));
 });
 
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+const setPublicAssetHeaders = (res, filePath) => {
+  if (path.extname(filePath).toLowerCase() === '.mp3') {
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Accept-Ranges', 'bytes');
+  }
+};
+app.use('/audio', express.static(path.join(__dirname, 'public', 'audio'), {
+  setHeaders: setPublicAssetHeaders,
+  maxAge: '1d',
+}));
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false,
+  setHeaders: setPublicAssetHeaders,
+}));
 
 app.use((error, _req, res, _next) => {
   console.error(JSON.stringify({
