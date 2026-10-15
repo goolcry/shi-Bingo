@@ -2661,6 +2661,12 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
     if (!['PLAYING', 'VERIFYING'].includes(room.status)) {
       throw Object.assign(new Error('This game is no longer accepting Bingo claims.'), { status: 409, code: 'GAME_NOT_PLAYING' });
     }
+    if (room.status === 'PLAYING') {
+      await connection.execute(
+        `UPDATE bingo_rooms SET status = 'VERIFYING' WHERE id = ? AND status = 'PLAYING'`,
+        [req.params.id],
+      );
+    }
     const [cards] = await connection.execute(
       `SELECT s.cartela_number, s.numbers
        FROM cartela_slots s

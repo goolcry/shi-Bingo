@@ -325,7 +325,7 @@ function App() {
   const activeSelectionMutations = useRef(0);
   const [game, setGame] = useState(null);
   const [pendingBingoClaim, setPendingBingoClaim] = useState(null);
-  const lastGameCall = useRef({ roomId: null, number: null });
+  const lastGameCall = useRef({ roomId: null, number: null, callIndex: 0 });
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
   const [ranks, setRanks] = useState([]);
@@ -628,7 +628,11 @@ function App() {
     if (!room?.id || (!['cartelas', 'waiting', 'game'].includes(view)
       && !(view === 'winner' && pendingBingoClaim))) return undefined;
     let active = true;
+    let timer = null;
+    let inFlight = false;
     const update = async () => {
+      if (!active || inFlight) return;
+      inFlight = true;
       const revision = roomStateRevision.current;
       const requestStartedAt = Date.now();
       try {
@@ -638,6 +642,9 @@ function App() {
         const roomId = String(room.id);
         const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
         if (finishedRoomId.current === roomId && !isFinished) return;
+        const callIndex = Number(data.game?.callIndex) || 0;
+        if (!isFinished && lastGameCall.current.roomId === roomId
+          && callIndex < lastGameCall.current.callIndex) return;
         if (isFinished) finishedRoomId.current = roomId;
         const currentNumber = data.game?.currentNumber ?? null;
         if (lastGameCall.current.roomId === room.id
@@ -645,7 +652,7 @@ function App() {
           && currentNumber !== lastGameCall.current.number) {
           telegramWebApp()?.HapticFeedback?.impactOccurred?.('medium');
         }
-        lastGameCall.current = { roomId: room.id, number: currentNumber };
+        lastGameCall.current = { roomId, number: currentNumber, callIndex };
         setRoom(withRoomClock(data.room));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
@@ -667,11 +674,16 @@ function App() {
         }
       } catch (reason) {
         if (active) console.warn('[Polling tick skipped]:', reason);
+      } finally {
+        inFlight = false;
+        if (active) timer = window.setTimeout(update, 750);
       }
     };
-    update();
-    const timer = window.setInterval(update, ['game', 'winner'].includes(view) ? 500 : 1500);
-    return () => { active = false; window.clearInterval(timer); };
+    void update();
+    return () => {
+      active = false;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   }, [room?.id, view, pendingBingoClaim, request]);
 
   useEffect(() => {
@@ -1207,7 +1219,6 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
     try { return window.localStorage.getItem('shisho_sound') !== 'false'; }
     catch { return true; }
   });
-  const [clockTick, setClockTick] = useState(Date.now());
   const [manualMarks, setManualMarks] = useState({});
   const [invalidCells, setInvalidCells] = useState({});
   const [claimPaused, setClaimPaused] = useState(false);
@@ -1215,66 +1226,17 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
     () => (Array.isArray(room?.cartelas) ? room.cartelas : []).filter((card) => card && card.state === 'MINE'),
     [room?.cartelas],
   );
-  const syncRef = useRef({ offset: 0 });
   const activeAudioRef = audioRef;
-  const callTimerRef = useRef(null);
   const frozenNumbersRef = useRef(null);
-  useEffect(() => {
-    if (game?.serverNow && game?.startedAt) {
-      syncRef.current.offset = Number(game.clientClockOffset ?? (Number(game.serverNow) - Date.now()));
-    }
-  }, [game?.serverNow, game?.startedAt, game?.clientClockOffset]);
   const calledNumbers = useMemo(() => parseNumberList(game?.calledNumbers), [game?.calledNumbers]);
-  const rawDrawOrder = game?.drawOrder ?? game?.draw_order ?? room?.draw_order;
-  const drawOrder = useMemo(() => parseNumberList(rawDrawOrder), [rawDrawOrder]);
-  const intervalMs = Number(game?.callIntervalMs || Number(game?.callIntervalSeconds || 4) * 1000);
-  const startedAtValue = game?.startedAt ?? game?.started_at ?? room?.startedAt ?? room?.started_at;
-  const startedAt = startedAtValue == null ? null : Number(startedAtValue);
-  const scheduleIsValid = startedAt !== null && Number.isFinite(startedAt)
-    && Number.isFinite(intervalMs) && intervalMs > 0 && drawOrder.length > 0;
-  const scheduledCount = scheduleIsValid
-    ? Math.min(drawOrder.length, Math.floor(Math.max(0, clockTick + syncRef.current.offset - startedAt) / intervalMs))
-    : 0;
   const callsAreFrozen = room?.status !== 'PLAYING' || game?.status === 'FINISHED' || claimPaused || isClaiming;
-  useEffect(() => {
-    if (callsAreFrozen) {
-      if (callTimerRef.current !== null) {
-        window.clearTimeout(callTimerRef.current);
-        callTimerRef.current = null;
-      }
-      return undefined;
-    }
-    let active = true;
-    const tick = () => {
-      if (!active) return;
-      const now = Date.now();
-      setClockTick(now);
-      const synchronizedNow = now + syncRef.current.offset;
-      const elapsed = scheduleIsValid ? synchronizedNow - startedAt : 0;
-      const remainder = scheduleIsValid
-        ? ((elapsed % intervalMs) + intervalMs) % intervalMs
-        : 0;
-      const delay = scheduleIsValid ? Math.max(1, intervalMs - remainder + 1) : 1000;
-      callTimerRef.current = window.setTimeout(tick, delay);
-    };
-    tick();
-    return () => {
-      active = false;
-      if (callTimerRef.current !== null) {
-        window.clearTimeout(callTimerRef.current);
-        callTimerRef.current = null;
-      }
-    };
-  }, [callsAreFrozen, game?.clientClockOffset, game?.serverNow, intervalMs, scheduleIsValid, startedAt]);
   const displayedNumbers = useMemo(() => {
     if (callsAreFrozen) return frozenNumbersRef.current || calledNumbers;
-    return drawOrder.length
-      ? drawOrder.slice(0, Math.min(drawOrder.length, Math.max(calledNumbers.length, scheduledCount)))
-      : calledNumbers;
-  }, [callsAreFrozen, calledNumbers, drawOrder, scheduledCount]);
+    return calledNumbers;
+  }, [callsAreFrozen, calledNumbers]);
   const displayedCalledSet = useMemo(() => new Set(displayedNumbers.map(Number)), [displayedNumbers]);
   const recent = displayedNumbers.slice(-2).reverse();
-  const currentNumber = displayedNumbers.at(-1) ?? parseNumberList([game?.currentNumber])[0] ?? null;
+  const currentNumber = displayedNumbers.at(-1) ?? null;
   const previousNumber = recent[1] ?? null;
   const markedNumbersFor = (card) => autoMark
     ? displayedCalledSet
@@ -1308,18 +1270,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
           return;
         }
         const voices = window.speechSynthesis.getVoices();
-        if (!voices.length) {
-          console.warn('No speech synthesis voices are available.');
-          return;
-        }
         if (!voices.some((voice) => voice.lang.toLowerCase().startsWith('am'))) {
-          window.speechSynthesis.cancel();
-          const utterance = new window.SpeechSynthesisUtterance(amharicCallText(currentNumber));
-          utterance.lang = 'am-ET';
-          utterance.rate = 0.9;
-          utterance.onerror = (event) => console.warn('[Amharic speech fallback failed]:', event.error);
-          window.speechSynthesis.speak(utterance);
-          return;
+          console.warn('No Amharic speech voice is available; using the device default voice.');
         }
         const utterance = new window.SpeechSynthesisUtterance(amharicCallText(currentNumber));
         utterance.lang = 'am-ET';
@@ -1541,6 +1493,8 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
   const [seconds, setSeconds] = useState(7);
   const nextRoundRef = useRef(onNextRound);
   const advanceStarted = useRef(false);
+  const fallbackDeadline = useRef(null);
+  const fallbackRoomId = useRef(null);
   const confirmedWinners = game?.winners || [];
   const previewWinner = claimPending && pendingWinner ? {
     userId: 'pending-claim',
@@ -1562,9 +1516,18 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     : null;
   const finishedAt = Number(room?.finishedAt ?? game?.finishedAt);
   const clientClockOffset = Number(game?.clientClockOffset) || 0;
+  const isFinished = game?.status === 'FINISHED' || room?.status === 'FINISHED';
+  if (fallbackRoomId.current !== String(room?.id)) {
+    fallbackRoomId.current = String(room?.id);
+    fallbackDeadline.current = null;
+  }
+  if ((claimPending || isFinished) && (!Number.isFinite(finishedAt) || finishedAt <= 0)
+    && fallbackDeadline.current === null) {
+    fallbackDeadline.current = Number(pendingWinner?.countdownDeadline) || Date.now() + 7000;
+  }
   const countdownDeadline = Number.isFinite(finishedAt) && finishedAt > 0
     ? finishedAt + 7000 - clientClockOffset
-    : Number(pendingWinner?.countdownDeadline) || null;
+    : fallbackDeadline.current;
   useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
   useEffect(() => {
     if (countdownDeadline === null) return undefined;
