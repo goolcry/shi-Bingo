@@ -772,7 +772,7 @@ function App() {
   async function enterRoom(item, { keepCurrentView = false } = {}) {
     if (!initData) {
       setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
-      return;
+      return false;
     }
     if (String(item.id) !== String(room?.id)) finishedRoomId.current = null;
     const sessionRevision = resetRoomState({ keepCurrentView });
@@ -803,6 +803,7 @@ function App() {
         setView(data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
       }
       setError('');
+      return true;
     } catch (reason) {
       try {
         await refreshRooms();
@@ -810,7 +811,8 @@ function App() {
         console.warn('[Room entry and room refresh failed]:', reason, refreshError);
       }
       console.warn('[Room entry failed]:', reason);
-      if (keepCurrentView) setView('play');
+      if (!keepCurrentView) setView('play');
+      return false;
     } finally {
       setBusy(false);
     }
@@ -893,16 +895,22 @@ function App() {
     roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
     setPendingBingoClaim(null);
-    try {
-      const data = await refreshRooms();
-      refreshWallet().catch((reason) => console.warn('[Next-round balance refresh skipped]:', reason));
-      const nextRoom = data.rooms.find((item) => item.status === 'WAITING');
-      if (nextRoom) await enterRoom(nextRoom, { keepCurrentView: true });
-      else setView('play');
-    } catch (reason) {
-      console.warn('[Next room lookup failed]:', reason);
-      setView('play');
+    let lastError = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const data = await refreshRooms();
+        refreshWallet().catch((reason) => console.warn('[Next-round balance refresh skipped]:', reason));
+        const nextRoom = data.rooms.find((item) => item.status === 'WAITING'
+          && Number(item.currentPlayers) < Number(item.maxPlayers));
+        if (nextRoom && await enterRoom(nextRoom, { keepCurrentView: true })) return;
+        lastError = new Error('No waiting room is ready for cartela selection yet.');
+      } catch (reason) {
+        lastError = reason;
+        console.warn('[Next room lookup failed]:', reason);
+      }
+      if (attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, 800));
     }
+    setError(lastError?.message || 'Could not enter the next round. Please try again.');
   }
 
   async function saveLanguage(value) {

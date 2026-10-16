@@ -274,6 +274,13 @@ function initializeSchema() {
       if (startedAtColumn[0] && Number(startedAtColumn[0].datetime_precision || 0) < 3) {
         await pool.query('ALTER TABLE bingo_rooms MODIFY started_at TIMESTAMP(3) NULL');
       }
+      const [finishedAtColumn] = await pool.execute(
+        `SELECT datetime_precision FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'bingo_rooms' AND column_name = 'finished_at'`,
+      );
+      if (finishedAtColumn[0] && Number(finishedAtColumn[0].datetime_precision || 0) < 3) {
+        await pool.query('ALTER TABLE bingo_rooms MODIFY finished_at TIMESTAMP(3) NULL');
+      }
       const [claimDeadlineColumns] = await pool.execute(
         `SELECT COUNT(*) AS count FROM information_schema.columns
          WHERE table_schema = DATABASE() AND table_name = 'bingo_rooms' AND column_name = 'claim_deadline'`,
@@ -1788,7 +1795,7 @@ async function settleRoom(connection, roomId, calledNumbers) {
     }
   }
   await connection.execute(
-    `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP, claim_deadline = NULL WHERE id = ?`,
+    `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP(3), claim_deadline = NULL WHERE id = ?`,
     [roomId],
   );
   return true;
@@ -1917,7 +1924,7 @@ async function advanceRoomGame(roomId) {
     const targetCallCount = Math.min(75, Math.floor(Number(elapsed.seconds) / interval));
     if (calledNumbers.length >= 75) {
       await connection.execute(
-        `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP(3) WHERE id = ?`,
         [roomId],
       );
       await connection.commit();
@@ -1936,7 +1943,7 @@ async function advanceRoomGame(roomId) {
     }
     if (calledNumbers.length === 75) {
       await connection.execute(
-        `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        `UPDATE bingo_rooms SET status = 'FINISHED', finished_at = CURRENT_TIMESTAMP(3) WHERE id = ?`,
         [roomId],
       );
     }
@@ -2747,33 +2754,7 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
         [req.params.id, String(req.telegramUser.id), claim.number, claim.pattern, calledNumbers.length],
       );
     }
-    await connection.execute(
-      `UPDATE bingo_rooms
-       SET status = 'VERIFYING',
-           claim_deadline = COALESCE(claim_deadline, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 7 SECOND))
-       WHERE id = ? AND status IN ('PLAYING', 'VERIFYING')`,
-      [req.params.id],
-    );
-    await connection.commit();
-
-    await connection.beginTransaction();
-    const [lockedRooms] = await connection.execute(
-      'SELECT status FROM bingo_rooms WHERE id = ? FOR UPDATE',
-      [req.params.id],
-    );
-    if (lockedRooms[0]?.status !== 'FINISHED') {
-      if (lockedRooms[0]?.status !== 'VERIFYING') {
-        throw Object.assign(new Error('Room left the Bingo verification state.'), {
-          status: 409,
-          code: 'GAME_NOT_PLAYING',
-        });
-      }
-      const [settlementCalls] = await connection.execute(
-        'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
-        [req.params.id],
-      );
-      await settleRoom(connection, req.params.id, settlementCalls.map((call) => Number(call.number)));
-    }
+    await settleRoom(connection, req.params.id, calledNumbers);
     const winners = await roomWinnerResults(connection, req.params.id);
     const finishedAt = await roomFinishedAt(connection, req.params.id);
     await connection.commit();
