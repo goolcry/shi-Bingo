@@ -368,6 +368,7 @@ function App() {
     if (sessionRevision !== roomSessionRevision.current) return data;
     const roomId = String(id);
     const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+    if (claimRequestInFlight.current && !isFinished) return data;
     if (finishedRoomId.current === roomId && !isFinished) return data;
     if (isFinished) {
       finishedRoomId.current = String(id);
@@ -379,7 +380,11 @@ function App() {
     if (data.wallet?.availableBalance !== undefined) {
       setWallet(data.wallet.availableBalance);
     }
-    setView(['PLAYING', 'VERIFYING'].includes(data.room.status) ? 'game' : data.room.status === 'FINISHED' ? 'winner' : 'cartelas');
+    const hasPendingWinner = data.room.status === 'VERIFYING'
+      && (data.winners?.length || data.game?.winners?.length);
+    setView(data.room.status === 'FINISHED' || hasPendingWinner
+      ? 'winner'
+      : ['PLAYING', 'VERIFYING'].includes(data.room.status) ? 'game' : 'cartelas');
     return data;
   }, [request]);
 
@@ -626,7 +631,7 @@ function App() {
 
   useEffect(() => {
     if (!room?.id || (!['cartelas', 'waiting', 'game'].includes(view)
-      && !(view === 'winner' && pendingBingoClaim))) return undefined;
+      && !(view === 'winner' && (pendingBingoClaim || room.status === 'VERIFYING')))) return undefined;
     let active = true;
     let timer = null;
     let inFlight = false;
@@ -641,6 +646,10 @@ function App() {
         if (!active || revision !== roomStateRevision.current) return;
         const roomId = String(room.id);
         const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+        const hasPendingWinner = data.room.status === 'VERIFYING'
+          && (data.winners?.length || data.game?.winners?.length);
+        const shouldShowWinner = isFinished || Boolean(hasPendingWinner);
+        if (claimRequestInFlight.current && !shouldShowWinner) return;
         if (finishedRoomId.current === roomId && !isFinished) return;
         const callIndex = Number(data.game?.callIndex) || 0;
         if (!isFinished && lastGameCall.current.roomId === roomId
@@ -656,9 +665,9 @@ function App() {
         setRoom(withRoomClock(data.room));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
-        if (isFinished) {
+        if (shouldShowWinner) {
           setPendingBingoClaim(null);
-          if (data.room.status !== 'FINISHED') {
+          if (isFinished && data.room.status !== 'FINISHED') {
             setRoom((current) => current && String(current.id) === String(room.id)
               ? { ...current, status: 'FINISHED' }
               : current);
@@ -684,7 +693,7 @@ function App() {
       active = false;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [room?.id, view, pendingBingoClaim, request]);
+  }, [room?.id, room?.status, view, pendingBingoClaim, request]);
 
   useEffect(() => {
     let active = true;
@@ -783,7 +792,11 @@ function App() {
       if (!data.spectator && data.room.status !== 'FINISHED') setMyRoomId(String(data.room.id));
       const hasCartelas = Array.isArray(data.room.cartelas)
         && data.room.cartelas.some((card) => card.state === 'MINE');
-      if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
+      const hasPendingWinner = data.room.status === 'VERIFYING'
+        && (data.winners?.length || data.game?.winners?.length);
+      if (data.room.status === 'FINISHED' || hasPendingWinner) {
+        setView('winner');
+      } else if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
         setView('game');
         if (!hasCartelas) console.info('[Room entry]: joining live game in spectator mode.');
       } else {
@@ -1527,7 +1540,9 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
   }
   const countdownDeadline = Number.isFinite(finishedAt) && finishedAt > 0
     ? finishedAt + 7000 - clientClockOffset
-    : fallbackDeadline.current;
+    : Number(room?.claimDeadline) > 0
+      ? Number(room.claimDeadline) - clientClockOffset
+      : fallbackDeadline.current;
   useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
   useEffect(() => {
     if (countdownDeadline === null) return undefined;
@@ -1536,7 +1551,8 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
       const remainingSeconds = Math.ceil(remainingMs / 1000);
       setSeconds(remainingSeconds);
       if (remainingMs === 0 && !claimPending
-        && (game?.status === 'FINISHED' || room?.status === 'FINISHED')
+        && (game?.status === 'FINISHED' || room?.status === 'FINISHED'
+          || (room?.status === 'VERIFYING' && winners.length > 0))
         && !advanceStarted.current) {
         advanceStarted.current = true;
         nextRoundRef.current();
@@ -1545,7 +1561,7 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     update();
     const timer = window.setInterval(update, 100);
     return () => window.clearInterval(timer);
-  }, [claimPending, countdownDeadline, game?.status, room?.status]);
+  }, [claimPending, countdownDeadline, game?.status, room?.status, winners.length]);
   return <section className={`winner-celebration ${claimPending ? 'optimistic-winner' : ''} ${winners.length ? 'has-winner' : ''}`}>
     <div className="winner-glow" aria-hidden="true" />
     <div className="winner-trophy">{winners.length ? '👑' : '🎱'}</div>
