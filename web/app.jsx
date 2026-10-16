@@ -471,13 +471,8 @@ function App() {
                 : current);
             }
             setView('winner');
-          } else if (reason.status && reason.status < 500) {
-            setPendingBingoClaim(null);
-            setView('game');
-            const telegram = telegramWebApp();
-            if (telegram?.showAlert) telegram.showAlert(reason.message || 'Bingo verification failed.');
-            else window.alert(reason.message || 'Bingo verification failed.');
-          } else if (!['PLAYING', 'VERIFYING'].includes(latest.room.status)) {
+          } else if ((reason.status && reason.status < 500) || latest.room.status === 'PLAYING'
+            || !['PLAYING', 'VERIFYING'].includes(latest.room.status)) {
             setPendingBingoClaim(null);
             setView('game');
             const telegram = telegramWebApp();
@@ -1372,10 +1367,6 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
     setIsClaiming(true);
     frozenNumbersRef.current = displayedNumbers;
     setClaimPaused(true);
-    if (callTimerRef.current !== null) {
-      window.clearTimeout(callTimerRef.current);
-      callTimerRef.current = null;
-    }
     telegramWebApp()?.HapticFeedback?.notificationOccurred?.('success');
     try {
       await onBingo(claimableCards.map((card) => card.number), winningCardNumber, displayedNumbers);
