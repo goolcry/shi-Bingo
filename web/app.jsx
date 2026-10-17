@@ -273,7 +273,7 @@ const words = {
   },
 };
 
-async function api(path, { method = 'GET', body, initData, allowAnonymous = false, signal } = {}) {
+async function api(path, { method = 'GET', body, initData, allowAnonymous = false, signal, cache } = {}) {
   if (!initData && !allowAnonymous) throw new Error('Open this Mini App from Telegram to authenticate.');
   const response = await fetch(path, {
     method,
@@ -283,6 +283,7 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
     ...(signal ? { signal } : {}),
+    ...(cache ? { cache } : {}),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -319,6 +320,7 @@ function App() {
   const [roomsLoading, setRoomsLoading] = useState(true);
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
+  const [roomReady, setRoomReady] = useState(false);
   const roomStateRevision = useRef(0);
   const roomSessionRevision = useRef(0);
   const finishedRoomId = useRef(null);
@@ -364,12 +366,14 @@ function App() {
     }
   }, [initData]);
 
-  const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current, signal) => {
+  const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current, signal, { onlyReconnect = false } = {}) => {
     const requestStartedAt = Date.now();
     const data = await request(`/api/rooms/${encodeURIComponent(id)}/state`, { signal });
     if (sessionRevision !== roomSessionRevision.current) return data;
     const roomId = String(id);
     const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+    if (onlyReconnect && (data.room.status !== 'PLAYING'
+      || !data.room.cartelas?.some((card) => card.state === 'MINE'))) return data;
     if (claimRequestInFlight.current && !isFinished) return data;
     if (finishedRoomId.current === roomId && !isFinished) return data;
     if (isFinished) {
@@ -378,6 +382,7 @@ function App() {
       finishedRoomId.current = null;
     }
     setRoom(withRoomClock(data.room));
+    setRoomReady(true);
     setGame(gameWithClockOffset(data.game, requestStartedAt));
     if (data.wallet?.availableBalance !== undefined) {
       setWallet(data.wallet.availableBalance);
@@ -539,7 +544,9 @@ function App() {
         if (view === 'game' || view === 'cartelas' || view === 'waiting') {
           setView('play');
           setRoom(null);
+          setRoomReady(false);
           setGame(null);
+          setBusy(false);
         } else if (view !== 'play') setView('play');
       });
       return () => telegram.BackButton.offClick();
@@ -553,8 +560,10 @@ function App() {
         if (!active) return;
         if (initData) {
           setError('');
-          if (roomData.myRoom) {
-            loadRoom(roomData.myRoom).catch((reason) => { if (active) setError(reason.message); });
+          const myRoom = roomData.rooms.find((item) => String(item.id) === String(roomData.myRoom));
+          if (myRoom?.status === 'PLAYING') {
+            loadRoom(roomData.myRoom, roomSessionRevision.current, undefined, { onlyReconnect: true })
+              .catch((reason) => { if (active) setError(reason.message); });
           }
         } else if (telegramChecked) {
           setError(telegramDiagnostic);
@@ -574,22 +583,22 @@ function App() {
   }, [initData, view, refreshRooms]);
 
   useEffect(() => {
-    if (view !== 'cartelas' || !room?.id || !initData) return undefined;
+    if (view !== 'cartelas' || !room?.id || !roomReady || !initData) return undefined;
     let active = true;
     let inFlight = false;
     const syncCartelas = async () => {
       if (inFlight || document.visibilityState !== 'visible') return;
       inFlight = true;
       try {
-        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`);
+        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`, { cache: 'no-store' });
         if (!active || !Array.isArray(data.cartelas)) return;
         const states = new Map(data.cartelas.map((card) => [Number(card.number), card.state]));
         setRoom((current) => {
           if (!current || String(current.id) !== String(room.id)) return current;
           let changed = false;
           const cartelas = current.cartelas.map((card) => {
-            const state = states.get(Number(card.number));
-            if (!state || state === card.state) return card;
+            const state = states.get(Number(card.number)) || 'AVAILABLE';
+            if (state === card.state) return card;
             changed = true;
             return { ...card, state };
           });
@@ -602,12 +611,12 @@ function App() {
       }
     };
     syncCartelas();
-    const timer = window.setInterval(syncCartelas, 350);
+    const timer = window.setInterval(syncCartelas, 280);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [view, room?.id, initData, request]);
+  }, [view, room?.id, roomReady, initData, request]);
 
   useEffect(() => {
     if (!initData) return undefined;
@@ -732,7 +741,9 @@ function App() {
     roomStateRevision.current += 1;
     finishedRoomId.current = null;
     setRoom(null);
+    setRoomReady(false);
     setGame(null);
+    setBusy(false);
     setView('play');
     Promise.all([refreshWallet(), refreshRooms()]).catch((reason) => console.warn('[Lobby refresh skipped]:', reason));
   }
@@ -742,6 +753,7 @@ function App() {
     roomStateRevision.current += 1;
     if (!keepCurrentView) {
       setRoom(null);
+      setRoomReady(false);
       setGame(null);
     }
     if (!keepCurrentView) setView('play');
@@ -771,9 +783,20 @@ function App() {
       setError('Open SHISHO BINGO from the Play button in the Telegram bot to authenticate and join.');
       return false;
     }
+    const cachedRoom = String(item.id) === String(room?.id) && room?.cartelas?.length === 100
+      ? room
+      : null;
     if (String(item.id) !== String(room?.id)) finishedRoomId.current = null;
     const sessionRevision = resetRoomState({ keepCurrentView });
+    setRoom(cachedRoom || withRoomClock({
+      ...item,
+      pot: item.pot ?? item.prizePool,
+      cartelas: [],
+    }));
+    setRoomReady(Boolean(cachedRoom));
+    if (!keepCurrentView) setView('cartelas');
     setBusy(true);
+    setError('');
     try {
       const requestStartedAt = Date.now();
       const [data, me] = await Promise.all([
@@ -784,6 +807,7 @@ function App() {
       if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
       setRoom(withRoomClock(data.room));
+      setRoomReady(true);
       setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
       setWallet(me.wallet.availableBalance ?? me.wallet.balance ?? data.wallet.availableBalance);
       if (!data.spectator && data.room.status !== 'FINISHED') setMyRoomId(String(data.room.id));
@@ -808,10 +832,11 @@ function App() {
         console.warn('[Room entry and room refresh failed]:', reason, refreshError);
       }
       console.warn('[Room entry failed]:', reason);
+      if (sessionRevision === roomSessionRevision.current) setError(reason.message);
       if (!keepCurrentView) setView('play');
       return false;
     } finally {
-      setBusy(false);
+      if (sessionRevision === roomSessionRevision.current) setBusy(false);
     }
   }
 
@@ -878,6 +903,7 @@ function App() {
       roomSessionRevision.current += 1;
       roomStateRevision.current += 1;
       setRoom(null);
+      setRoomReady(false);
       setGame(null);
       setView('play');
       await Promise.all([refreshWallet(), refreshRooms()]);
@@ -949,7 +975,7 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
+      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
       {view === 'winner' && <WinnerScreen
@@ -1032,7 +1058,7 @@ function PlayScreen({ t, rooms, myRoomId, roomsLoading, onJoin, busy, onRefresh 
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
+function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave }) {
   const [clockNow, setClockNow] = useState(Date.now());
   const [overrides, setOverrides] = useState({});
   const [pending, setPending] = useState({});
@@ -1052,6 +1078,9 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
     ...card,
     state: overrides[card.number]?.state || card.state,
   }));
+  const displayedCards = loading
+    ? Array.from({ length: 100 }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
+    : cards;
   const mine = cards.filter((card) => card.state === 'MINE');
   const availableCartelas = cards.filter((card) => card.state === 'AVAILABLE').length;
   const pendingValues = Object.values(pending);
@@ -1168,7 +1197,16 @@ function CartelaScreen({ room, t, busy, wallet, onToggle, onBack, onLeave }) {
       <div className="cartela-hud-card starts-in"><small>{t.startingIn}</small><b>{timerLabel}</b></div>
     </section>
     {!waiting && <p className="cartela-closed-note" role="status">{t.cartelaClosed}</p>}
-    {cards.length !== 100
+    {loading
+      ? <div className="cartela-grid-8col" aria-label={t.cartelaSelection} aria-busy="true">
+        {displayedCards.map((card) => <button
+          key={`${room.id}-${card.number}`}
+          className="cartela-btn loading"
+          disabled
+          aria-label={`${t.cartela} ${card.number}: ${t.loading}`}
+        >{card.number}</button>)}
+      </div>
+      : cards.length !== 100
       ? <div className="cartela-load-error" role="alert">{t.cartelaLoadFailed.replace('{count}', cards.length)}</div>
       : <div className="cartela-grid-8col" aria-label={t.cartelaSelection}>
         {cards.map((card) => <button
@@ -1957,7 +1995,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-btn:active{transform:scale(.92)}
 .cartela-btn.taken{border-color:#6b1d31;background:#521626;color:#ffffff66;pointer-events:none}
 .cartela-btn.mine{border-color:#35dbad;background:#10b981;color:#fff;box-shadow:0 0 10px #10b98166}
-.cartela-btn:disabled{opacity:1}
+.cartela-btn:disabled{opacity:1}.cartela-btn.loading{border-color:#49316c;background:#281a4a;color:#fff8}
 .cartela-previews{display:grid;gap:9px;padding:2px 14px 18px}
 .cartela-preview-placeholder{margin:0;padding:12px 2px;color:#8b7fa8;font-size:12px;text-align:center}
 .cartela-preview-card{padding:10px;border:1px solid #2d1b54;border-radius:12px;background:#1c1033}

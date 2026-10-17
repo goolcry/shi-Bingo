@@ -2876,39 +2876,33 @@ app.get('/api/rooms/:id/cartelas', authenticatedTelegramUser, async (req, res, n
 });
 
 app.get('/api/rooms/:id/cartelas-sync', authenticatedTelegramUser, async (req, res, next) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, private',
+    Pragma: 'no-cache',
+    Expires: '0',
+    'Surrogate-Control': 'no-store',
+  });
   try {
     await initializeSchema();
     const [rows] = await pool.execute(
-      `SELECT s.cartela_number, s.owner_telegram_id,
-              (SELECT r.telegram_id
-               FROM cartela_reservations r
-               WHERE r.room_id = s.room_id
-                 AND r.cartela_number = s.cartela_number
-                 AND r.status = 'ACTIVE'
-               ORDER BY r.id DESC
-               LIMIT 1) AS reservation_owner
-       FROM cartela_slots s
-       WHERE s.room_id = ?
-       ORDER BY s.cartela_number`,
+      `SELECT cartela_number, owner_telegram_id
+       FROM cartela_slots
+       WHERE room_id = ? AND owner_telegram_id IS NOT NULL
+       ORDER BY cartela_number`,
       [req.params.id],
     );
-    if (rows.length !== 100) {
-      throw Object.assign(new Error('Room cartelas are unavailable.'), { status: 404 });
-    }
     const telegramId = String(req.telegramUser.id);
     res.json({
       cartelas: rows.map((row) => {
-        const owner = row.reservation_owner ?? row.owner_telegram_id;
         return {
           number: Number(row.cartela_number),
-          state: owner == null ? 'AVAILABLE' : String(owner) === telegramId ? 'MINE' : 'TAKEN',
+          state: String(row.owner_telegram_id) === telegramId ? 'MINE' : 'TAKEN',
         };
       }),
-      myId: telegramId,
     });
   } catch (error) {
-    next(error);
+    console.error(`[Cartela sync failed] room ${req.params.id}:`, error);
+    res.status(500).json({ error: 'SYNC_ERROR' });
   }
 });
 
