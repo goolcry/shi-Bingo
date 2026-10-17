@@ -191,6 +191,7 @@ const words = {
     paymentUnconfigured: 'Payment methods are not configured.',
     minWithdrawal: 'Minimum withdrawal: 50.00 BIRR. Requests reserve funds while an administrator reviews the payout.',
     accountDetails: 'Phone/account details', room: 'Room', wins: 'wins', you: '(You)',
+    destinationName: 'Destination name (account holder)',
     settingsTitle: 'Settings', rulesTitle: 'Rules',
     shareAndInvite: 'Share invite', shareAction: 'Share', sharedWallet: 'SHARED WALLET',
     youWon: 'You', historyRoom: 'Room #{id}', cartelasLabel: 'Cartelas:',
@@ -250,6 +251,7 @@ const words = {
     paymentUnconfigured: 'የክፍያ ዘዴዎች አልተዋቀሩም።',
     minWithdrawal: 'ዝቅተኛ የማውጣት መጠን፦ 50.00 ብር። አስተዳዳሪው እስኪገመግም ገንዘቡ ይያዛል።',
     accountDetails: 'ስልክ/የሂሳብ ዝርዝር', room: 'ክፍል', wins: 'አሸንፈዋል', you: '(እርስዎ)',
+    destinationName: 'የተቀባይ ስም (የሂሳብ ባለቤት)',
     settingsTitle: 'ቅንብሮች', rulesTitle: 'ህጎች',
     shareAndInvite: 'ግብዣ አጋራ', shareAction: 'አጋራ', sharedWallet: 'የጋራ ቦርሳ',
     youWon: 'እርስዎ', historyRoom: 'ክፍል #{id}', cartelasLabel: 'ካርቴላዎች:',
@@ -1664,6 +1666,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
   const [withdrawMethod, setWithdrawMethod] = useState('TELEBIRR');
   const [withdrawAmount, setWithdrawAmount] = useState('');
   const [payoutDetails, setPayoutDetails] = useState('');
+  const [destinationName, setDestinationName] = useState('');
   const [withdrawStatus, setWithdrawStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
@@ -1706,12 +1709,14 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
           amount: withdrawAmount,
           method: withdrawMethod,
           payoutDetails,
+          destinationName,
           idempotencyKey: crypto.randomUUID().replaceAll('-', ''),
         },
       });
       setWithdrawStatus(t.withdrawalSubmitted.replace('{id}', data.request.id));
       setWithdrawAmount('');
       setPayoutDetails('');
+      setDestinationName('');
       await onRefresh();
     } catch (error) {
       setWithdrawStatus(error.message);
@@ -1736,6 +1741,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
         <label>{t.amountBirr}<input required inputMode="decimal" value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} /></label>
         <label>{t.paymentMethod}<select value={withdrawMethod} onChange={(event) => setWithdrawMethod(event.target.value)}><option value="TELEBIRR">Telebirr</option><option value="CBE">CBE</option></select></label>
         <label>{t.accountDetails}<input required minLength="5" maxLength="191" value={payoutDetails} onChange={(event) => setPayoutDetails(event.target.value)} /></label>
+        <label>{t.destinationName}<input required minLength="2" maxLength="255" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></label>
         <button className="primary-button" disabled={busy}>{busy ? t.loading : t.withdraw}</button>
         {withdrawStatus && <p className="muted" role="status">{withdrawStatus}</p>}
       </form>

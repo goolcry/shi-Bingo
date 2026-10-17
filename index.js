@@ -7,10 +7,22 @@ const path = require('node:path');
 const express = require('express');
 const mysql = require('mysql2/promise');
 
-const requiredEnv = ['BOT_TOKEN', 'DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD', 'DATABASE_NAME', 'MINI_APP_URL', 'ADMIN_TELEGRAM_ID', 'WEBHOOK_SECRET', 'SETUP_SECRET', 'CRON_SECRET'];
+const requiredEnv = ['BOT_TOKEN', 'DATABASE_HOST', 'DATABASE_USER', 'DATABASE_PASSWORD', 'DATABASE_NAME', 'MINI_APP_URL', 'WEBHOOK_SECRET', 'SETUP_SECRET', 'CRON_SECRET'];
 const missingEnv = requiredEnv.filter((name) => !process.env[name]);
+const configuredAdminIds = (process.env.ADMIN_IDS || process.env.ADMIN_ID || process.env.ADMIN_TELEGRAM_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
+if (!configuredAdminIds.length) missingEnv.push('ADMIN_IDS (or ADMIN_ID / ADMIN_TELEGRAM_ID)');
 if (missingEnv.length) {
   throw new Error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+}
+if (configuredAdminIds.some((id) => !/^\d+$/.test(id))) {
+  throw new Error('ADMIN_IDS must contain comma-separated numeric Telegram IDs.');
+}
+const adminIds = [...new Set(configuredAdminIds)];
+function isAdminId(telegramId) {
+  return adminIds.includes(String(telegramId));
 }
 for (const name of ['WEBHOOK_SECRET', 'SETUP_SECRET', 'CRON_SECRET']) {
   if (!/^[A-Za-z0-9_-]{32,256}$/.test(process.env[name])) {
@@ -30,7 +42,7 @@ function validConfiguredMoney(value) {
 
 const config = {
   botToken: process.env.BOT_TOKEN,
-  adminId: String(process.env.ADMIN_TELEGRAM_ID),
+  adminId: adminIds[0],
   webhookSecret: process.env.WEBHOOK_SECRET,
   setupSecret: process.env.SETUP_SECRET,
   cronSecret: process.env.CRON_SECRET,
@@ -99,6 +111,7 @@ function initializeSchema() {
           language VARCHAR(2) NOT NULL DEFAULT 'en',
           phone_number VARCHAR(20) NULL,
           bonus_claimed TINYINT(1) NOT NULL DEFAULT 0,
+          role ENUM('USER', 'ADMIN') NOT NULL DEFAULT 'USER',
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB
@@ -175,6 +188,17 @@ function initializeSchema() {
           if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
         }
       }
+      const [roleColumn] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'role'`,
+      );
+      if (!Number(roleColumn[0].count)) {
+        try {
+          await pool.query("ALTER TABLE users ADD COLUMN role ENUM('USER', 'ADMIN') NOT NULL DEFAULT 'USER'");
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
       const [phoneIndex] = await pool.execute(
         `SELECT COUNT(*) AS count FROM information_schema.statistics
          WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uq_users_phone_number'`,
@@ -221,6 +245,7 @@ function initializeSchema() {
           amount DECIMAL(20, 2) NOT NULL,
           payout_method VARCHAR(24) NOT NULL,
           payout_details VARCHAR(191) NOT NULL,
+          destination_name VARCHAR(255) NULL,
           status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
           reviewed_by BIGINT UNSIGNED NULL,
           reviewed_at TIMESTAMP NULL,
@@ -231,6 +256,18 @@ function initializeSchema() {
           CONSTRAINT fk_withdrawal_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      const [withdrawalNameColumn] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'withdrawal_requests'
+           AND column_name = 'destination_name'`,
+      );
+      if (!Number(withdrawalNameColumn[0].count)) {
+        try {
+          await pool.query('ALTER TABLE withdrawal_requests ADD COLUMN destination_name VARCHAR(255) NULL');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
       await pool.query(`
         CREATE TABLE IF NOT EXISTS user_flows (
           telegram_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
@@ -457,8 +494,9 @@ const text = {
     enterDepositReference: 'Enter the transaction/reference ID from your payment.',
     withdrawalInfo: (balance, minimum) => `Available balance: ${balance} BIRR\nMinimum withdrawal: ${minimum} BIRR\nFee: 0 BIRR\nPending requests reserve their amount until approved or rejected.\n\nEnter the amount to withdraw, or Cancel.`,
     withdrawalMethod: 'Choose how you want to receive the withdrawal:',
-    withdrawalDetails: 'Enter your Telebirr phone number or CBE account details.',
-    withdrawalConfirm: (amount, method, details) => `Confirm withdrawal request:\nAmount: ${amount} BIRR\nFee: 0 BIRR\nMethod: ${method}\nAccount: ${details}`,
+    withdrawalDetails: 'Enter your Telebirr phone number or CBE account number.',
+    withdrawalDestinationName: '👤 Please enter the Destination Name (Full Account Holder Name):\nእባክዎ የባንክ/ቴሌብር አካውንቱ የተመዘገበበትን ትክክለኛ ስም ያስገቡ፡',
+    withdrawalConfirm: (amount, method, details, destinationName) => `Confirm withdrawal request:\nAmount: ${amount} BIRR\nFee: 0 BIRR\nMethod: ${method}\nAccount number: ${details}\nDestination name: ${destinationName}`,
     withdrawalPending: (id) => `Withdrawal request #${id} is pending admin review. The requested funds are reserved; no payout has been made yet.`,
     withdrawalDisabled: 'Withdrawals are currently unavailable.',
     cancelled: 'Request cancelled.',
@@ -507,8 +545,9 @@ const text = {
     enterDepositReference: 'ከክፍያዎ የግብይት መለያ ያስገቡ።',
     withdrawalInfo: (balance, minimum) => `ያለ ቀሪ ሂሳብ፦ ${balance} ብር\nዝቅተኛ የማውጫ መጠን፦ ${minimum} ብር\nክፍያ፦ 0 ብር\nየሚጠባበቁ ጥያቄዎች እስኪጸድቁ ወይም ውድቅ እስኪደረጉ ድረስ ገንዘቡን ይይዛሉ።\n\nለማውጣት የሚፈልጉትን መጠን ያስገቡ ወይም Cancel ይጫኑ።`,
     withdrawalMethod: 'ገንዘቡን የሚቀበሉበትን ዘዴ ይምረጡ፦',
-    withdrawalDetails: 'የቴሌብር ስልክ ቁጥርዎን ወይም የCBE ሂሳብ ያስገቡ።',
-    withdrawalConfirm: (amount, method, details) => `የገንዘብ ማውጫ ጥያቄውን ያረጋግጡ፦\nመጠን፦ ${amount} ብር\nክፍያ፦ 0 ብር\nዘዴ፦ ${method}\nሂሳብ፦ ${details}`,
+    withdrawalDetails: 'የቴሌብር ስልክ ቁጥርዎን ወይም የCBE ሂሳብ ቁጥር ያስገቡ።',
+    withdrawalDestinationName: '👤 Please enter the Destination Name (Full Account Holder Name):\nእባክዎ የባንክ/ቴሌብር አካውንቱ የተመዘገበበትን ትክክለኛ ስም ያስገቡ፡',
+    withdrawalConfirm: (amount, method, details, destinationName) => `የገንዘብ ማውጫ ጥያቄውን ያረጋግጡ፦\nመጠን፦ ${amount} ብር\nክፍያ፦ 0 ብር\nዘዴ፦ ${method}\nሂሳብ ቁጥር፦ ${details}\nየተቀባይ ስም፦ ${destinationName}`,
     withdrawalPending: (id) => `የማውጫ ጥያቄ #${id} የአስተዳዳሪ ግምገማ እየጠበቀ ነው። ገንዘቡ ተይዟል፤ ክፍያ ገና አልተፈጸመም።`,
     withdrawalDisabled: 'የገንዘብ ማውጫ አገልግሎት ለጊዜው ዝግ ነው።',
     cancelled: 'ጥያቄው ተሰርዟል።',
@@ -562,16 +601,18 @@ function telegramApi(method, payload = {}) {
   });
 }
 
-function keyboardFor(lang) {
+function keyboardFor(lang, telegramId) {
   const t = text[lang];
+  const keyboard = [
+    [{ text: t.play }],
+    [{ text: t.balance }, { text: t.profile }],
+    [{ text: t.deposit }, { text: t.withdraw }],
+    [{ text: t.invite }, { text: t.channel }],
+    [{ text: t.support }],
+  ];
+  if (telegramId && isAdminId(telegramId)) keyboard.push([{ text: '🛠 Admin Panel' }]);
   return {
-    keyboard: [
-      [{ text: t.play }],
-      [{ text: t.balance }, { text: t.profile }],
-      [{ text: t.deposit }, { text: t.withdraw }],
-      [{ text: t.invite }, { text: t.channel }],
-      [{ text: t.support }],
-    ],
+    keyboard,
     resize_keyboard: true,
     is_persistent: true,
   };
@@ -691,6 +732,9 @@ async function upsertUser(user) {
        last_name = VALUES(last_name), updated_at = CURRENT_TIMESTAMP`,
     [id, username, firstName, lastName, defaultLanguage],
   );
+  if (isAdminId(id)) {
+    await pool.execute("UPDATE users SET role = 'ADMIN' WHERE telegram_id = ?", [id]);
+  }
   await pool.execute('INSERT IGNORE INTO wallets (telegram_id) VALUES (?)', [id]);
   await ensureReferralCode(id);
   return { id, firstName, username };
@@ -855,10 +899,16 @@ async function notifyAdminOfDeposit(request) {
     `Transaction ID: ${request.providerReference}`,
     'Status: PENDING',
   ].join('\n');
-  await telegramApi('sendMessage', {
-    chat_id: config.adminId,
+  const results = await Promise.allSettled(adminIds.map((adminId) => telegramApi('sendMessage', {
+    chat_id: adminId,
     text: message,
     reply_markup: depositReviewKeyboard(request.id),
+  })));
+  if (results.every((result) => result.status === 'rejected')) {
+    throw new Error('Could not notify any configured administrator about the deposit.');
+  }
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') console.error(`Deposit notification failed for admin ${adminIds[index]}:`, result.reason.message);
   });
 }
 
@@ -870,30 +920,40 @@ async function notifyAdminOfWithdrawal(request) {
     `Request: #${request.id}`,
     `User: ${user?.first_name || 'Player'}${user?.username ? ` (@${user.username})` : ''}`,
     `Telegram ID: ${request.telegramId}`,
+    `Phone: ${user?.phone_number || 'Not verified'}`,
     `Amount: ${request.amount} BIRR`,
     `Payment method: ${request.method}`,
     `Account: ${request.details}`,
+    `Destination name: ${request.destinationName || 'Not provided'}`,
     `Available balance: ${request.availableBalance} BIRR`,
     'Status: PENDING — verify payout before approval.',
   ].join('\n');
-  await telegramApi('sendMessage', {
-    chat_id: config.adminId,
+  const results = await Promise.allSettled(adminIds.map((adminId) => telegramApi('sendMessage', {
+    chat_id: adminId,
     text: message,
     reply_markup: withdrawalReviewKeyboard(request.id),
+  })));
+  if (results.every((result) => result.status === 'rejected')) {
+    throw new Error('Could not notify any configured administrator about the withdrawal.');
+  }
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') console.error(`Withdrawal notification failed for admin ${adminIds[index]}:`, result.reason.message);
   });
 }
 
-async function createWithdrawalRequest(telegramId, amountInput, method, detailsInput, idempotencyKey) {
+async function createWithdrawalRequest(telegramId, amountInput, method, detailsInput, destinationNameInput, idempotencyKey) {
   const amount = validDepositAmount(amountInput);
   const details = typeof detailsInput === 'string' ? detailsInput.trim() : '';
+  const destinationName = typeof destinationNameInput === 'string' ? destinationNameInput.trim() : '';
   if (!amount) throw Object.assign(new Error(text.en.invalidAmount), { status: 400 });
   if (decimalToMinorUnits(amount) < decimalToMinorUnits(config.withdrawalMinimum)) {
     throw Object.assign(new Error(text.en.minimumWithdrawal(config.withdrawalMinimum)), { status: 400 });
   }
   if (!/^[A-Za-z0-9_-]{24,64}$/.test(String(idempotencyKey || '')) ||
       !['TELEBIRR', 'CBE'].includes(method) || details.length < 5 || details.length > 191 ||
-      /[\u0000-\u001f\u007f]/.test(details)) {
-    throw Object.assign(new Error('Choose Telebirr or CBE and provide valid payout details.'), { status: 400 });
+      /[\u0000-\u001f\u007f]/.test(details) || destinationName.length < 2 ||
+      destinationName.length > 255 || /[\u0000-\u001f\u007f]/.test(destinationName)) {
+    throw Object.assign(new Error('Choose Telebirr or CBE, provide valid payout details, and enter the destination account holder name.'), { status: 400 });
   }
 
   const connection = await pool.getConnection();
@@ -910,9 +970,10 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
       throw Object.assign(new Error(text.en.insufficientFunds), { status: 400 });
     }
     const [insert] = await connection.execute(
-      `INSERT INTO withdrawal_requests (telegram_id, idempotency_key, amount, payout_method, payout_details)
-       VALUES (?, ?, ?, ?, ?)`,
-      [String(telegramId), idempotencyKey, amount, method, details],
+      `INSERT INTO withdrawal_requests
+       (telegram_id, idempotency_key, amount, payout_method, payout_details, destination_name)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [String(telegramId), idempotencyKey, amount, method, details, destinationName],
     );
     request = {
       id: String(insert.insertId),
@@ -920,6 +981,7 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
       amount,
       method,
       details,
+      destinationName,
       availableBalance,
     };
     await connection.commit();
@@ -927,7 +989,8 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
     await connection.rollback();
     if (error.code === 'ER_DUP_ENTRY') {
       const [existing] = await pool.execute(
-        `SELECT id, amount, payout_method FROM withdrawal_requests WHERE idempotency_key = ? LIMIT 1`,
+        `SELECT id, amount, payout_method, payout_details, destination_name
+         FROM withdrawal_requests WHERE idempotency_key = ? LIMIT 1`,
         [idempotencyKey],
       );
       if (existing[0]) {
@@ -936,6 +999,8 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
           telegramId: String(telegramId),
           amount: formatAmount(existing[0].amount),
           method: existing[0].payout_method,
+          details: existing[0].payout_details,
+          destinationName: existing[0].destination_name,
           notificationSent: true,
           duplicate: true,
         };
@@ -1045,6 +1110,7 @@ async function reviewWithdrawal(id, decision, adminId, reason = '') {
       console.error(`User notification failed for withdrawal #${id}:`, error.message);
     }
   }
+  outcome.id = String(id);
   return outcome;
 }
 
@@ -1229,11 +1295,229 @@ async function pendingDeposits(limit = 10) {
 async function pendingWithdrawals(limit = 10) {
   await initializeSchema();
   const [rows] = await pool.query(
-    `SELECT r.id, r.telegram_id, r.amount, r.payout_method, r.payout_details, u.first_name, u.username
+    `SELECT r.id, r.telegram_id, r.amount, r.payout_method, r.payout_details, r.destination_name,
+            u.first_name, u.username, u.phone_number
      FROM withdrawal_requests r JOIN users u ON u.telegram_id = r.telegram_id
      WHERE r.status = 'PENDING' ORDER BY r.created_at ASC LIMIT ${Number(limit)}`,
   );
   return rows;
+}
+
+function adminPanelKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '📊 Analytics', callback_data: 'admin:analytics' }, { text: '👥 Users', callback_data: 'admin:users' }],
+      [{ text: '💸 Pending withdrawals', callback_data: 'admin:withdrawals:0' }],
+      [{ text: '📣 Broadcast message', callback_data: 'admin:broadcast' }],
+    ],
+  };
+}
+
+async function sendAdminPanel(chatId) {
+  await telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: '🛠 SHISHO BINGO ADMIN PANEL',
+    reply_markup: adminPanelKeyboard(),
+  });
+}
+
+async function sendAdminAnalytics(chatId) {
+  const [[users]] = await pool.execute(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN phone_number IS NOT NULL THEN 1 ELSE 0 END) AS verified,
+            SUM(CASE WHEN created_at >= CURRENT_DATE() THEN 1 ELSE 0 END) AS signed_up_today
+     FROM users`,
+  );
+  const [[rooms]] = await pool.execute(
+    `SELECT SUM(CASE WHEN status IN ('PLAYING', 'VERIFYING') THEN 1 ELSE 0 END) AS active,
+            SUM(CASE WHEN status = 'FINISHED' AND finished_at >= CURRENT_DATE() THEN 1 ELSE 0 END) AS finished_today
+     FROM bingo_rooms`,
+  );
+  const [[deposits]] = await pool.execute(
+    `SELECT COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN amount ELSE 0 END), 0) AS approved
+     FROM deposit_requests`,
+  );
+  const [[withdrawals]] = await pool.execute(
+    `SELECT SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+            COALESCE(SUM(CASE WHEN status = 'APPROVED' THEN amount ELSE 0 END), 0) AS paid
+     FROM withdrawal_requests`,
+  );
+  await telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: [
+      '📊 ADMIN ANALYTICS',
+      '',
+      `Registered users: ${Number(users.total || 0)}`,
+      `Phone verified: ${Number(users.verified || 0)}`,
+      `New users today: ${Number(users.signed_up_today || 0)}`,
+      `Active rooms: ${Number(rooms.active || 0)}`,
+      `Finished games today: ${Number(rooms.finished_today || 0)}`,
+      `Approved deposits: ${formatAmount(deposits.approved)} BIRR`,
+      `Paid withdrawals: ${formatAmount(withdrawals.paid)} BIRR`,
+      `Pending withdrawals: ${Number(withdrawals.pending || 0)}`,
+    ].join('\n'),
+    reply_markup: { inline_keyboard: [[{ text: '↩ Admin panel', callback_data: 'admin:panel' }]] },
+  });
+}
+
+async function sendAdminUserSummary(chatId) {
+  const [[users]] = await pool.execute(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN phone_number IS NOT NULL THEN 1 ELSE 0 END) AS verified,
+            SUM(CASE WHEN created_at >= CURRENT_DATE() THEN 1 ELSE 0 END) AS today
+     FROM users`,
+  );
+  const [[wallets]] = await pool.execute('SELECT COALESCE(SUM(balance), 0) AS balance FROM wallets');
+  await telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: `👥 USER SUMMARY\n\nTotal users: ${Number(users.total || 0)}\nPhone verified: ${Number(users.verified || 0)}\nJoined today: ${Number(users.today || 0)}\nWallet balances: ${formatAmount(wallets.balance)} BIRR`,
+    reply_markup: { inline_keyboard: [[{ text: '↩ Admin panel', callback_data: 'admin:panel' }]] },
+  });
+}
+
+async function sendAdminPendingWithdrawals(chatId, offset) {
+  const pageSize = 5;
+  const [rows] = await pool.execute(
+    `SELECT r.id, r.telegram_id, r.amount, r.payout_method, r.payout_details, r.destination_name,
+            u.first_name, u.username, u.phone_number
+     FROM withdrawal_requests r JOIN users u ON u.telegram_id = r.telegram_id
+     WHERE r.status = 'PENDING' ORDER BY r.created_at ASC LIMIT ${pageSize} OFFSET ?`,
+    [offset],
+  );
+  if (!rows.length) {
+    await telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: offset > 0 ? 'No more pending withdrawal requests.' : 'There are no pending withdrawal requests.',
+      reply_markup: { inline_keyboard: [[{ text: '↩ Admin panel', callback_data: 'admin:panel' }]] },
+    });
+    return;
+  }
+  for (const row of rows) {
+    await telegramApi('sendMessage', {
+      chat_id: chatId,
+      text: [
+        `💸 PENDING WITHDRAWAL #${row.id}`,
+        `User: ${row.first_name || 'Player'}${row.username ? ` (@${row.username})` : ''}`,
+        `Telegram ID: ${row.telegram_id}`,
+        `Phone: ${row.phone_number || 'Not verified'}`,
+        `Amount: ${formatAmount(row.amount)} BIRR`,
+        `Method: ${row.payout_method}`,
+        `Account: ${row.payout_details}`,
+        `Destination name: ${row.destination_name || 'Not provided'}`,
+        'Confirm only after completing the external payout.',
+      ].join('\n'),
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Confirm paid', callback_data: `admin:withdraw:approve:${row.id}` },
+          { text: '❌ Reject', callback_data: `admin:withdraw:reject:${row.id}` },
+        ]],
+      },
+    });
+  }
+  const navigation = [];
+  if (offset > 0) navigation.push({ text: '⬅ Previous', callback_data: `admin:withdrawals:${Math.max(0, offset - pageSize)}` });
+  if (rows.length === pageSize) navigation.push({ text: 'Next ➡', callback_data: `admin:withdrawals:${offset + pageSize}` });
+  navigation.push({ text: '↩ Admin panel', callback_data: 'admin:panel' });
+  await telegramApi('sendMessage', { chat_id: chatId, text: 'Withdrawal request navigation:', reply_markup: { inline_keyboard: [navigation] } });
+}
+
+async function runAdminBroadcast(adminId, chatId, broadcastText) {
+  try {
+    const [recipients] = await pool.execute(
+      'SELECT telegram_id FROM users WHERE phone_number IS NOT NULL ORDER BY telegram_id',
+    );
+    let delivered = 0;
+    let failed = 0;
+    for (const recipient of recipients) {
+      try {
+        await telegramApi('sendMessage', { chat_id: recipient.telegram_id, text: broadcastText });
+        delivered += 1;
+      } catch (error) {
+        failed += 1;
+        console.error(`Admin broadcast failed for Telegram user ${recipient.telegram_id}:`, error.message);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    }
+    try {
+      await telegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `Broadcast finished.\nDelivered: ${delivered}\nFailed: ${failed}`,
+      });
+    } catch (error) {
+      console.error(`Could not send broadcast report to admin ${adminId}:`, error.message);
+    }
+  } catch (error) {
+    console.error(`Admin broadcast failed for admin ${adminId}:`, error);
+    try {
+      await telegramApi('sendMessage', { chat_id: chatId, text: 'Broadcast failed before completion. Check the server logs.' });
+    } catch (notificationError) {
+      console.error(`Could not report broadcast failure to admin ${adminId}:`, notificationError.message);
+    }
+  }
+}
+
+async function handleAdminCallback(callback, data) {
+  const adminId = String(callback.from.id);
+  if (!isAdminId(adminId)) {
+    await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: text.en.adminOnly, show_alert: true });
+    return true;
+  }
+  const chatId = callback.message?.chat?.id || adminId;
+  if (data === 'admin:panel') {
+    await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+    await sendAdminPanel(chatId);
+  } else if (data === 'admin:analytics') {
+    await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+    await sendAdminAnalytics(chatId);
+  } else if (data === 'admin:users') {
+    await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+    await sendAdminUserSummary(chatId);
+  } else if (/^admin:withdrawals:\d+$/.test(data)) {
+    await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+    await sendAdminPendingWithdrawals(chatId, Math.min(Math.floor(Number(data.split(':')[2])), 10000));
+  } else {
+    const withdrawalAction = /^admin:withdraw:(approve|reject):(\d+)$/.exec(data);
+    if (withdrawalAction) {
+      const [, action, requestId] = withdrawalAction;
+      if (action === 'reject') {
+        await setUserFlow(adminId, 'admin_reject', 'reason', { entity: 'WITHDRAWAL', id: requestId });
+        await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+        await telegramApi('sendMessage', { chat_id: chatId, text: `Enter a rejection reason for withdrawal #${requestId}, or send /cancel.` });
+      } else {
+        const outcome = await reviewWithdrawal(requestId, 'APPROVED', adminId);
+        await telegramApi('answerCallbackQuery', {
+          callback_query_id: callback.id,
+          text: outcome.changed ? `Withdrawal #${requestId} approved.` : outcome.found ? `Already ${outcome.status.toLowerCase()}.` : 'Request not found.',
+          show_alert: !outcome.changed,
+        });
+        await sendAdminPendingWithdrawals(chatId, 0);
+      }
+    } else if (data === 'admin:broadcast') {
+      await setUserFlow(adminId, 'admin_broadcast', 'message', {});
+      await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+      await telegramApi('sendMessage', {
+        chat_id: chatId,
+        text: 'Send the broadcast text (up to 3,500 characters). Use /cancel to discard it.',
+      });
+    } else if (data === 'admin:broadcast:confirm') {
+      const flow = await getUserFlow(adminId);
+      if (flow?.flow !== 'admin_broadcast' || flow.step !== 'confirm' || !flow.data.message) {
+        await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'No broadcast is awaiting confirmation.', show_alert: true });
+        return true;
+      }
+      await clearUserFlow(adminId);
+      await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Broadcast started.' });
+      await telegramApi('sendMessage', { chat_id: chatId, text: 'Broadcast started. I will send a completion report when it finishes.' });
+      setImmediate(() => runAdminBroadcast(adminId, chatId, flow.data.message));
+    } else if (data === 'admin:broadcast:cancel') {
+      await clearUserFlow(adminId);
+      await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: 'Broadcast cancelled.' });
+      await sendAdminPanel(chatId);
+    } else {
+      return false;
+    }
+  }
+  return true;
 }
 
 async function getProfile(telegramId) {
@@ -1309,7 +1593,7 @@ async function beginWithdrawal(chatId, telegramId, lang) {
     return telegramApi('sendMessage', {
       chat_id: chatId,
       text: `${text[lang].withdrawalInfo(available, config.withdrawalMinimum)}\n\n${text[lang].minimumWithdrawal(config.withdrawalMinimum)}`,
-      reply_markup: keyboardFor(lang),
+      reply_markup: keyboardFor(lang, user.id),
     });
   }
   await setUserFlow(telegramId, 'withdrawal', 'amount', {
@@ -1438,7 +1722,7 @@ function isMenuText(input, lang) {
 
 async function handleAdminRejectFlow(message, user, lang) {
   const flow = await getUserFlow(user.id);
-  if (flow?.flow !== 'admin_reject' || String(user.id) !== config.adminId) return false;
+  if (flow?.flow !== 'admin_reject' || !isAdminId(user.id)) return false;
   const reason = String(message.text || '').trim();
   if (/^\/cancel$/i.test(reason)) {
     await clearUserFlow(user.id);
@@ -1457,8 +1741,8 @@ async function handleAdminRejectFlow(message, user, lang) {
     return true;
   }
   const result = flow.data.entity === 'DEPOSIT'
-    ? await reviewDeposit(flow.data.id, 'REJECTED', config.adminId, reason)
-    : await reviewWithdrawal(flow.data.id, 'REJECTED', config.adminId, reason);
+    ? await reviewDeposit(flow.data.id, 'REJECTED', user.id, reason)
+    : await reviewWithdrawal(flow.data.id, 'REJECTED', user.id, reason);
   await clearUserFlow(user.id);
   await telegramApi('sendMessage', {
     chat_id: message.chat.id,
@@ -1468,6 +1752,38 @@ async function handleAdminRejectFlow(message, user, lang) {
         ? `${flow.data.entity} #${flow.data.id} was already ${result.status.toLowerCase()}.`
         : `${flow.data.entity} #${flow.data.id} was not found.`,
     reply_markup: keyboardFor(lang),
+  });
+  return true;
+}
+
+async function handleAdminBroadcastMessage(message, user) {
+  if (!isAdminId(user.id)) return false;
+  const flow = await getUserFlow(user.id);
+  if (flow?.flow !== 'admin_broadcast' || flow.step !== 'message') return false;
+  const input = String(message.text || '').trim();
+  if (/^\/cancel$/i.test(input)) {
+    await clearUserFlow(user.id);
+    await sendAdminPanel(message.chat.id);
+    return true;
+  }
+  if (!input || input.length > 3500 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(input)) {
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: 'Broadcast text must be 1–3,500 characters and contain no control characters. Send /cancel to discard it.',
+    });
+    return true;
+  }
+  const [recipients] = await pool.execute('SELECT COUNT(*) AS count FROM users WHERE phone_number IS NOT NULL');
+  await setUserFlow(user.id, 'admin_broadcast', 'confirm', { message: input });
+  await telegramApi('sendMessage', {
+    chat_id: message.chat.id,
+    text: `Broadcast preview (${Number(recipients[0].count)} registered recipients):\n\n${input}\n\nSend this message to all phone-verified users?`,
+    reply_markup: {
+      inline_keyboard: [[
+        { text: '📣 Send to everyone', callback_data: 'admin:broadcast:confirm' },
+        { text: 'Cancel', callback_data: 'admin:broadcast:cancel' },
+      ]],
+    },
   });
   return true;
 }
@@ -1563,10 +1879,27 @@ async function handleUserFlow(message, user, lang) {
       return true;
     }
     const data = { ...flow.data, details };
+    await setUserFlow(user.id, 'withdrawal', 'destination_name', data);
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: text[lang].withdrawalDestinationName,
+      reply_markup: {
+        inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
+      },
+    });
+    return true;
+  }
+  if (flow.flow === 'withdrawal' && flow.step === 'destination_name') {
+    const destinationName = input.trim();
+    if (destinationName.length < 2 || destinationName.length > 255 || /[\u0000-\u001f\u007f]/.test(destinationName)) {
+      await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].withdrawalDestinationName });
+      return true;
+    }
+    const data = { ...flow.data, destinationName };
     await setUserFlow(user.id, 'withdrawal', 'confirm', data);
     await telegramApi('sendMessage', {
       chat_id: message.chat.id,
-      text: text[lang].withdrawalConfirm(data.amount, data.method, data.details),
+      text: text[lang].withdrawalConfirm(data.amount, data.method, data.details, data.destinationName),
       reply_markup: {
         inline_keyboard: [[
           { text: '✅ Confirm request', callback_data: 'withdraw:confirm' },
@@ -1678,7 +2011,7 @@ async function optionalTelegramUser(req, res, next) {
 }
 
 function adminOnly(req, res, next) {
-  if (String(req.telegramUser.id) !== config.adminId) {
+  if (!isAdminId(req.telegramUser.id)) {
     return res.status(403).json({ error: 'Administrator access is required.' });
   }
   next();
@@ -2968,7 +3301,7 @@ app.get('/api/me', authenticatedTelegramUser, async (req, res, next) => {
         deposits: config.paymentMethods.length > 0,
         withdrawals: true,
         liveGames: true,
-        admin: String(req.telegramUser.id) === config.adminId,
+        admin: isAdminId(req.telegramUser.id),
       },
     });
   } catch (error) {
@@ -3130,6 +3463,7 @@ app.post('/api/withdrawals', authenticatedTelegramUser, async (req, res, next) =
       req.body?.amount,
       req.body?.method,
       req.body?.payoutDetails,
+      req.body?.destinationName,
       req.body?.idempotencyKey,
     );
     res.status(request.duplicate ? 200 : 201).json({
@@ -3195,10 +3529,12 @@ app.post('/admin/setup', async (req, res, next) => {
           { command: 'language', description: 'Change language' },
         ],
       });
-      step = 'setAdminCommands';
-      await telegramApi(step, {
-        scope: { type: 'chat', chat_id: config.adminId },
-        commands: [
+      for (const adminId of adminIds) {
+        step = 'setAdminCommands';
+        await telegramApi(step, {
+          scope: { type: 'chat', chat_id: adminId },
+          commands: [
+          { command: 'admin', description: 'Open the admin dashboard' },
           { command: 'start', description: 'Open SHISHO BINGO' },
           { command: 'play', description: 'Open the Bingo Mini App' },
           { command: 'balance', description: 'View your wallet balance' },
@@ -3212,8 +3548,9 @@ app.post('/admin/setup', async (req, res, next) => {
           { command: 'pendingdeposits', description: 'Review pending deposits' },
           { command: 'pendingwithdrawals', description: 'Review pending withdrawals' },
           { command: 'language', description: 'Change language' },
-        ],
-      });
+          ],
+        });
+      }
     } catch (error) {
       console.error(`Telegram setup failed during ${step}:`, error.message);
       return res.status(502).json({
@@ -3237,7 +3574,12 @@ app.post('/telegram/webhook', async (req, res, next) => {
       const callback = update.callback_query;
       const callbackUser = await upsertUser(callback.from);
       const callbackProfile = await getUser(callbackUser.id);
-      if (!callbackProfile?.phone_number) {
+      const callbackData = String(callback.data || '');
+      if (callbackData.startsWith('admin:')) {
+        await handleAdminCallback(callback, callbackData);
+        return res.sendStatus(200);
+      }
+      if (!callbackProfile?.phone_number && !isAdminId(callbackUser.id)) {
         await telegramApi('answerCallbackQuery', {
           callback_query_id: callback.id,
           text: 'Share your phone number to register first.',
@@ -3320,6 +3662,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
             flow.data.amount,
             flow.data.method,
             flow.data.details,
+            flow.data.destinationName,
             flow.data.idempotencyKey,
           );
           await clearUserFlow(user.id);
@@ -3399,7 +3742,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
             },
           });
         } else if (depositReview || withdrawalReview) {
-          if (String(callback.from.id) !== config.adminId) {
+          if (!isAdminId(callback.from.id)) {
             await telegramApi('answerCallbackQuery', {
               callback_query_id: callback.id,
               text: text[lang].adminOnly,
@@ -3430,8 +3773,8 @@ app.post('/telegram/webhook', async (req, res, next) => {
             return res.sendStatus(200);
           }
           const outcome = depositReview
-            ? await reviewDeposit(matchReview[2], decision, config.adminId)
-            : await reviewWithdrawal(matchReview[2], decision, config.adminId);
+            ? await reviewDeposit(matchReview[2], decision, callback.from.id)
+            : await reviewWithdrawal(matchReview[2], decision, callback.from.id);
           const answer = !outcome.found ? 'Request not found.'
             : outcome.changed ? `Request ${outcome.status.toLowerCase()}.`
               : `Already ${outcome.status.toLowerCase()}.`;
@@ -3490,7 +3833,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
         await telegramApi('sendMessage', {
           chat_id: message.chat.id,
           text: successText,
-          reply_markup: keyboardFor(lang),
+          reply_markup: keyboardFor(lang, user.id),
         });
       } catch (error) {
         if (error.code === 'PHONE_ALREADY_REGISTERED') {
@@ -3505,20 +3848,30 @@ app.post('/telegram/webhook', async (req, res, next) => {
       }
       return res.sendStatus(200);
     }
+    if (/^\/admin(?:@\w+)?$/i.test(input) || input === '🛠 Admin Panel') {
+      if (!isAdminId(user.id)) {
+        await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });
+      } else {
+        await clearUserFlow(user.id);
+        await sendAdminPanel(message.chat.id);
+      }
+      return res.sendStatus(200);
+    }
+    if (await handleAdminBroadcastMessage(message, user)) return res.sendStatus(200);
+    if (await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
     if (!savedUser?.phone_number) {
       await requestPhoneNumber(message.chat.id);
       return res.sendStatus(200);
     }
-    if (await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
     if (await handleUserFlow(message, user, lang)) return res.sendStatus(200);
 
     if (startMatch) {
       let welcome = `👋 Welcome back, ${savedUser.first_name}! / እንኳን ደህና መጡ!\nYou are already registered.`;
-      if (user.id === config.adminId) welcome += '\n\nAdmin tools: /pendingdeposits and /pendingwithdrawals';
+      if (isAdminId(user.id)) welcome += '\n\nAdmin dashboard: /admin';
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
         text: welcome,
-        reply_markup: keyboardFor(lang),
+        reply_markup: keyboardFor(lang, user.id),
       });
     } else if (/^\/play(?:@\w+)?$/i.test(input) || input === t.play) {
       await sendPlayEntry(message.chat.id, user.id, lang);
@@ -3574,7 +3927,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
         },
       });
     } else if (/^\/pendingdeposits(?:@\w+)?$/i.test(input)) {
-      if (user.id !== config.adminId) {
+      if (!isAdminId(user.id)) {
         await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });
       } else {
         const requests = await pendingDeposits();
@@ -3599,7 +3952,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
         }
       }
     } else if (/^\/pendingwithdrawals(?:@\w+)?$/i.test(input)) {
-      if (user.id !== config.adminId) {
+      if (!isAdminId(user.id)) {
         await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });
       } else {
         const requests = await pendingWithdrawals();
@@ -3617,6 +3970,8 @@ app.post('/telegram/webhook', async (req, res, next) => {
                 `Amount: ${formatAmount(request.amount)} BIRR`,
                 `Payment method: ${request.payout_method}`,
                 `Account: ${request.payout_details}`,
+                `Destination name: ${request.destination_name || 'Not provided'}`,
+                `Phone: ${request.phone_number || 'Not verified'}`,
                 'Complete the external payout before using Confirm paid & approve.',
               ].join('\n'),
               reply_markup: withdrawalReviewKeyboard(request.id),
