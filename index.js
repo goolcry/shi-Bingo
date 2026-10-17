@@ -84,6 +84,7 @@ const roomMinPlayers = 3;
 const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
 const roomCountdownSeconds = 30;
+const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
 
 let schemaPromise;
 function initializeSchema() {
@@ -96,6 +97,8 @@ function initializeSchema() {
           first_name VARCHAR(128) NOT NULL,
           last_name VARCHAR(128) NULL,
           language VARCHAR(2) NOT NULL DEFAULT 'en',
+          phone_number VARCHAR(20) NULL,
+          bonus_claimed TINYINT(1) NOT NULL DEFAULT 0,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB
@@ -150,6 +153,37 @@ function initializeSchema() {
           await pool.query('ALTER TABLE users ADD COLUMN referral_code VARCHAR(16) NULL');
         } catch (error) {
           if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
+      const [registrationColumns] = await pool.execute(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'users'
+           AND column_name IN ('phone_number', 'bonus_claimed')`,
+      );
+      const existingRegistrationColumns = new Set(registrationColumns.map((column) => column.column_name));
+      if (!existingRegistrationColumns.has('phone_number')) {
+        try {
+          await pool.query('ALTER TABLE users ADD COLUMN phone_number VARCHAR(20) NULL');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
+      if (!existingRegistrationColumns.has('bonus_claimed')) {
+        try {
+          await pool.query('ALTER TABLE users ADD COLUMN bonus_claimed TINYINT(1) NOT NULL DEFAULT 0');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
+      const [phoneIndex] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.statistics
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uq_users_phone_number'`,
+      );
+      if (!Number(phoneIndex[0].count)) {
+        try {
+          await pool.query('CREATE UNIQUE INDEX uq_users_phone_number ON users (phone_number)');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_KEYNAME' && error.errno !== 1061) throw error;
         }
       }
       const [referralIndex] = await pool.execute(
@@ -532,16 +566,115 @@ function keyboardFor(lang) {
   const t = text[lang];
   return {
     keyboard: [
-      [{ text: t.play, web_app: { url: config.appUrl } }],
+      [{ text: t.play }],
       [{ text: t.balance }, { text: t.profile }],
       [{ text: t.deposit }, { text: t.withdraw }],
-      [{ text: t.invite }, { text: t.support }],
-      [{ text: t.channel }],
-      [{ text: t.language }],
+      [{ text: t.invite }, { text: t.channel }],
+      [{ text: t.support }],
     ],
     resize_keyboard: true,
     is_persistent: true,
   };
+}
+
+function phoneRequestKeyboard() {
+  return {
+    keyboard: [[{
+      text: '📱 Share Phone Number / ስልክ ቁጥር ያጋሩ',
+      request_contact: true,
+    }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+  };
+}
+
+async function requestPhoneNumber(chatId) {
+  return telegramApi('sendMessage', {
+    chat_id: chatId,
+    text: '👋 Welcome to SHISHO BINGO!\n\nTo access the game and claim your 10 BIRR registration bonus, please share your phone number using the button below:\n\nእንኳን ወደ ሺሾ ቢንጎ በደህና መጡ! ለመጫወት እና የ10 ብር ጉርሻዎን ለመቀበል እባክዎ ስልክ ቁጥርዎን ያጋሩ။',
+    reply_markup: phoneRequestKeyboard(),
+  });
+}
+
+function normalizePhoneNumber(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed || !/^\+?[\d\s().-]+$/.test(trimmed)) return null;
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 7 || digits.length > 15) return null;
+  return `+${digits}`;
+}
+
+async function registerPhoneAndGrantBonus(telegramId, phoneNumber) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [[user]] = await connection.execute(
+      'SELECT phone_number, bonus_claimed FROM users WHERE telegram_id = ? FOR UPDATE',
+      [String(telegramId)],
+    );
+    if (!user) throw new Error('User account was not found.');
+    const [[phoneOwner]] = await connection.execute(
+      'SELECT telegram_id FROM users WHERE phone_number = ? AND telegram_id <> ? LIMIT 1',
+      [phoneNumber, String(telegramId)],
+    );
+    if (phoneOwner) {
+      throw Object.assign(new Error('This phone number is already registered under another account.'), {
+        code: 'PHONE_ALREADY_REGISTERED',
+      });
+    }
+    if (user.phone_number && user.phone_number !== phoneNumber) {
+      throw Object.assign(new Error('A different phone number is already registered to this account.'), {
+        code: 'PHONE_ALREADY_REGISTERED',
+      });
+    }
+    await connection.execute('UPDATE users SET phone_number = ? WHERE telegram_id = ?', [
+      phoneNumber, String(telegramId),
+    ]);
+    const [[existingBonus]] = await connection.execute(
+      `SELECT id FROM wallet_transactions
+       WHERE telegram_id = ? AND type = 'REGISTRATION_BONUS' LIMIT 1`,
+      [String(telegramId)],
+    );
+    if (existingBonus || Number(user.bonus_claimed)) {
+      await connection.execute('UPDATE users SET bonus_claimed = 1 WHERE telegram_id = ?', [String(telegramId)]);
+      await connection.commit();
+      return { bonusCredited: false };
+    }
+
+    const [[wallet]] = await connection.execute(
+      'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+      [String(telegramId)],
+    );
+    if (!wallet) throw new Error('Wallet record was not found.');
+    const before = decimalToMinorUnits(wallet.balance);
+    const after = before + 1000n;
+    await connection.execute('UPDATE wallets SET balance = ? WHERE telegram_id = ?', [
+      minorUnitsToDecimal(after), String(telegramId),
+    ]);
+    await connection.execute(
+      `INSERT INTO wallet_transactions
+       (telegram_id, type, amount, balance_before, balance_after, reference_id, description)
+       VALUES (?, 'REGISTRATION_BONUS', ?, ?, ?, ?, ?)`,
+      [
+        String(telegramId), '10.00', minorUnitsToDecimal(before), minorUnitsToDecimal(after),
+        String(telegramId), 'One-time phone-verified registration bonus',
+      ],
+    );
+    await connection.execute('UPDATE users SET bonus_claimed = 1 WHERE telegram_id = ?', [String(telegramId)]);
+    await connection.commit();
+    return { bonusCredited: true };
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    if (error.code === 'ER_DUP_ENTRY') {
+      throw Object.assign(new Error('This phone number is already registered under another account.'), {
+        code: 'PHONE_ALREADY_REGISTERED',
+      });
+    }
+    throw error;
+  } finally {
+    connection.release();
+  }
 }
 
 async function upsertUser(user) {
@@ -607,7 +740,8 @@ async function attributeReferral(newUserId, startPayload) {
 async function getUser(id) {
   await initializeSchema();
   const [rows] = await pool.execute(
-    `SELECT u.telegram_id, u.username, u.first_name, u.last_name, u.language, u.referral_code, w.balance
+    `SELECT u.telegram_id, u.username, u.first_name, u.last_name, u.language, u.referral_code,
+       u.phone_number, u.bonus_claimed, w.balance
      FROM users u JOIN wallets w ON w.telegram_id = u.telegram_id
      WHERE u.telegram_id = ? LIMIT 1`,
     [String(id)],
@@ -1113,8 +1247,13 @@ async function getProfile(telegramId) {
     [String(telegramId)],
   );
   const [[wins]] = await pool.execute(
-    `SELECT COUNT(*) AS total, COALESCE(SUM(amount), 0.00) AS winnings
-     FROM wallet_transactions WHERE telegram_id = ? AND type = 'GAME_WIN'`,
+    `SELECT COUNT(DISTINCT room_id) AS total,
+       COALESCE(SUM(prize), 0.00) AS winnings
+     FROM game_winners WHERE telegram_id = ?`,
+    [String(telegramId)],
+  );
+  const [[played]] = await pool.execute(
+    'SELECT COUNT(DISTINCT room_id) AS total FROM cartela_reservations WHERE telegram_id = ?',
     [String(telegramId)],
   );
   return {
@@ -1122,6 +1261,7 @@ async function getProfile(telegramId) {
     availableBalance,
     referralCount: Number(referrals.qualified || 0),
     referralInvites: Number(referrals.total || 0),
+    gamesPlayed: Number(played.total || 0),
     gamesWon: Number(wins.total || 0),
     winnings: formatAmount(wins.winnings || '0.00'),
   };
@@ -1210,7 +1350,7 @@ async function sendHistory(chatId, telegramId, lang) {
   }
   const lines = rows.map((row) => {
     const date = new Date(row.created_at).toISOString().replace('T', ' ').slice(0, 16);
-    const sign = ['DEPOSIT', 'GAME_WIN', 'GAME_REFUND', 'REFERRAL_REWARD', 'ADMIN_ADJUSTMENT'].includes(row.type) ? '+' : '-';
+    const sign = ['DEPOSIT', 'GAME_WIN', 'GAME_REFUND', 'REGISTRATION_BONUS', 'REFERRAL_REWARD', 'ADMIN_ADJUSTMENT'].includes(row.type) ? '+' : '-';
     return `${date} · ${row.type} · ${sign}${formatAmount(row.amount)} BIRR · balance ${formatAmount(row.balance_after)} BIRR`;
   });
   return telegramApi('sendMessage', { chat_id: chatId, text: `📜 Wallet history\n\n${lines.join('\n')}` });
@@ -1224,12 +1364,13 @@ async function sendProfile(chatId, telegramId, lang) {
   const message = [
     text[lang].profileTitle,
     '',
-    `Name: ${displayName}`,
+    `Name: ${displayName || 'Player'}`,
     `Username: ${username}`,
+    `Phone: ${user.phone_number || 'Not verified'}`,
     `Telegram ID: ${user.telegram_id}`,
     `Available balance: ${profile.availableBalance} BIRR`,
     `Successful referrals: ${profile.referralCount}`,
-    `Games played: Not available — game service is not implemented.`,
+    `Games played: ${profile.gamesPlayed}`,
     `Games won: ${profile.gamesWon}`,
     `Total game winnings: ${profile.winnings} BIRR`,
   ].join('\n');
@@ -1249,8 +1390,7 @@ async function sendPlayEntry(chatId, telegramId, lang) {
   if (config.requireChannelMembership) {
     const membership = await channelMembership(telegramId);
     if (!membership.member) {
-      const buttons = [];
-      if (config.channelUrl) buttons.push({ text: '📢 Join channel', url: config.channelUrl });
+      const buttons = [{ text: '📢 Join Official Channel / ቻናላችንን ይቀላቀሉ', url: officialChannelUrl }];
       if (config.channelChatId) buttons.push({ text: '✅ Verify membership', callback_data: 'channel:verify' });
       return telegramApi('sendMessage', {
         chat_id: chatId,
@@ -1263,9 +1403,9 @@ async function sendPlayEntry(chatId, telegramId, lang) {
   }
   return telegramApi('sendMessage', {
     chat_id: chatId,
-    text: 'Open the Shisho Bingo lobby. Active rooms appear there when the game service is available.',
+    text: 'Pick a room and play 🎯',
     reply_markup: {
-      inline_keyboard: [[{ text: text[lang].play, web_app: { url: config.appUrl } }]],
+      inline_keyboard: [[{ text: '🎮 Open game · ጨዋታ', web_app: { url: config.appUrl } }]],
     },
   });
 }
@@ -1477,10 +1617,9 @@ function verifyInitData(initData) {
   return user;
 }
 
-function authenticatedTelegramUser(req, res, next) {
+async function authenticatedTelegramUser(req, res, next) {
   try {
     req.telegramUser = verifyInitData(req.get('Authorization')?.replace(/^tma\s+/i, ''));
-    next();
   } catch (error) {
     console.warn(JSON.stringify({
       event: 'telegram_auth_rejected',
@@ -1488,11 +1627,27 @@ function authenticatedTelegramUser(req, res, next) {
       route: req.path,
       code: 'TELEGRAM_AUTH_FAILED',
     }));
-    res.status(error.status || 401).json({ error: error.message });
+    return res.status(error.status || 401).json({ error: error.message });
+  }
+  try {
+    await initializeSchema();
+    const [[user]] = await pool.execute(
+      'SELECT phone_number FROM users WHERE telegram_id = ?',
+      [String(req.telegramUser.id)],
+    );
+    if (!user?.phone_number) {
+      return res.status(403).json({
+        error: 'Share and verify your phone number with the bot before using the game.',
+        code: 'PHONE_VERIFICATION_REQUIRED',
+      });
+    }
+    next();
+  } catch (error) {
+    next(error);
   }
 }
 
-function optionalTelegramUser(req, res, next) {
+async function optionalTelegramUser(req, res, next) {
   const authorization = req.get('Authorization');
   if (!authorization) {
     next();
@@ -1500,9 +1655,25 @@ function optionalTelegramUser(req, res, next) {
   }
   try {
     req.telegramUser = verifyInitData(authorization.replace(/^tma\s+/i, ''));
-    next();
   } catch (error) {
     res.status(error.status || 401).json({ error: error.message });
+    return;
+  }
+  try {
+    await initializeSchema();
+    const [[user]] = await pool.execute(
+      'SELECT phone_number FROM users WHERE telegram_id = ?',
+      [String(req.telegramUser.id)],
+    );
+    if (!user?.phone_number) {
+      return res.status(403).json({
+        error: 'Share and verify your phone number with the bot before using the game.',
+        code: 'PHONE_VERIFICATION_REQUIRED',
+      });
+    }
+    next();
+  } catch (error) {
+    next(error);
   }
 }
 
@@ -2832,6 +3003,7 @@ app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
         lastName: profile.user.last_name,
         username: profile.user.username,
         language: profile.user.language,
+        phoneNumber: profile.user.phone_number,
       },
       wallet: { availableBalance: profile.availableBalance, currency: 'BIRR' },
       referrals: { successful: profile.referralCount, total: profile.referralInvites },
@@ -3063,6 +3235,17 @@ app.post('/telegram/webhook', async (req, res, next) => {
     const update = req.body || {};
     if (update.callback_query) {
       const callback = update.callback_query;
+      const callbackUser = await upsertUser(callback.from);
+      const callbackProfile = await getUser(callbackUser.id);
+      if (!callbackProfile?.phone_number) {
+        await telegramApi('answerCallbackQuery', {
+          callback_query_id: callback.id,
+          text: 'Share your phone number to register first.',
+          show_alert: true,
+        });
+        if (callback.message?.chat?.id) await requestPhoneNumber(callback.message.chat.id);
+        return res.sendStatus(200);
+      }
       const match = /^lang:(en|am)$/.exec(callback.data || '');
       if (match) {
         const user = await upsertUser(callback.from);
@@ -3281,11 +3464,56 @@ app.post('/telegram/webhook', async (req, res, next) => {
     const input = String(message.text || '').trim();
     const startMatch = /^\/start(?:@\w+)?(?:\s+(.+))?$/i.exec(input);
     if (startMatch?.[1]) await attributeReferral(user.id, startMatch[1]);
+    if (message.contact) {
+      if (Number(message.contact.user_id) !== Number(message.from.id)) {
+        await telegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: 'Please use the button to share your own phone number.',
+          reply_markup: phoneRequestKeyboard(),
+        });
+        return res.sendStatus(200);
+      }
+      const phoneNumber = normalizePhoneNumber(message.contact.phone_number);
+      if (!phoneNumber) {
+        await telegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: 'That phone number is not valid. Please share your phone number again.',
+          reply_markup: phoneRequestKeyboard(),
+        });
+        return res.sendStatus(200);
+      }
+      try {
+        const registration = await registerPhoneAndGrantBonus(user.id, phoneNumber);
+        const successText = registration.bonusCredited
+          ? '✅ Registration complete!\n🎁 10.00 BIRR registration bonus has been credited to your play wallet.\n\nየ10 ብር መመዝገቢያ ጉርሻ ወደ ሂሳብዎ ገብቷል!'
+          : '✅ Your phone number is verified. Your registration bonus has already been credited.';
+        await telegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: successText,
+          reply_markup: keyboardFor(lang),
+        });
+      } catch (error) {
+        if (error.code === 'PHONE_ALREADY_REGISTERED') {
+          await telegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: 'This phone number is already registered under another account.',
+            reply_markup: phoneRequestKeyboard(),
+          });
+          return res.sendStatus(200);
+        }
+        throw error;
+      }
+      return res.sendStatus(200);
+    }
+    if (!savedUser?.phone_number) {
+      await requestPhoneNumber(message.chat.id);
+      return res.sendStatus(200);
+    }
     if (await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
     if (await handleUserFlow(message, user, lang)) return res.sendStatus(200);
 
     if (startMatch) {
-      let welcome = t.welcome(user.firstName) + '\n\n' + t.menu;
+      let welcome = `👋 Welcome back, ${savedUser.first_name}! / እንኳን ደህና መጡ!\nYou are already registered.`;
       if (user.id === config.adminId) welcome += '\n\nAdmin tools: /pendingdeposits and /pendingwithdrawals';
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
@@ -3335,19 +3563,16 @@ app.post('/telegram/webhook', async (req, res, next) => {
         });
       }
     } else if (input === t.channel || /^\/channel(?:@\w+)?$/i.test(input)) {
-      if (!config.channelUrl) {
-        await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.channelUnavailable });
-      } else {
-        const membership = await channelMembership(user.id);
-        const buttons = [{ text: '📢 Join channel', url: config.channelUrl }];
-        if (config.channelChatId) buttons.push({ text: '✅ Verify membership', callback_data: 'channel:verify' });
-        await telegramApi('sendMessage', {
-          chat_id: message.chat.id,
-          text: membership.member ? t.channelVerified
-            : membership.verifiable ? t.channelJoin : `${t.channelJoin}\n\n${t.channelVerifyUnavailable}`,
-          reply_markup: { inline_keyboard: [buttons] },
-        });
-      }
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: '📢 Join Official Channel / ቻናላችንን ይቀላቀሉ',
+        reply_markup: {
+          inline_keyboard: [[{
+            text: '📢 Join Official Channel / ቻናላችንን ይቀላቀሉ',
+            url: officialChannelUrl,
+          }]],
+        },
+      });
     } else if (/^\/pendingdeposits(?:@\w+)?$/i.test(input)) {
       if (user.id !== config.adminId) {
         await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.adminOnly });

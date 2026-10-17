@@ -1625,6 +1625,7 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, a
   return <><div className="eyebrow">{t.playerProfile}</div><h1 className="page-title">👤 {t.profile}</h1>
     <section className="profile-card panel"><div className="avatar">{(info?.firstName || 'S').slice(0, 1).toUpperCase()}</div>
       <h2>{[info?.firstName, info?.lastName].filter(Boolean).join(' ') || t.loading}</h2><p className="muted">{info?.username ? `@${info.username} · ` : ''}{t.playerId} {info?.id || '—'}</p>
+      {info?.phoneNumber && <p className="muted">📱 {info.phoneNumber}</p>}
       <div className="profile-stats">
         <Stat label={t.balance} value={wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`} />
         <Stat label={t.gamesWon} value={profile?.games?.won ?? '—'} />
