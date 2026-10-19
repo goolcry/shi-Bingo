@@ -2981,10 +2981,23 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
     await initializeSchema();
     const telegramId = String(req.telegramUser.id);
     const roomId = String(req.params.id);
+    const [[room]] = await pool.execute(
+      `SELECT status, prize_pool,
+              UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
+              UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms
+       FROM bingo_rooms WHERE id = ?`,
+      [roomId],
+    );
+    if (!room) return res.status(404).json({ error: 'ROOM_NOT_FOUND' });
     const [rows] = await pool.execute(
       `SELECT cartela_number, owner_telegram_id
        FROM cartela_slots
        WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
+      [roomId],
+    );
+    const [[players]] = await pool.execute(
+      `SELECT COUNT(*) AS count FROM bingo_players
+       WHERE room_id = ? AND left_at IS NULL`,
       [roomId],
     );
     const cache = new Map(rows.map((row) => [
@@ -2997,7 +3010,13 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
       userId: owner,
       isMine: owner === telegramId,
     }));
+    const serverTime = Number(room.server_now_ms);
     res.json({
+      serverTime,
+      selectionEndsAt: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+      status: room.status,
+      pot: minorUnitsToDecimal(decimalToMinorUnits(room.prize_pool) * 80n / 100n),
+      playersCount: Number(players.count),
       taken,
       currentUserId: telegramId,
     });

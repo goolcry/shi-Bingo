@@ -301,13 +301,13 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
   return data;
 }
 
-function withRoomClock(room) {
+function withRoomClock(room, requestStartedAt = Date.now()) {
   if (!room?.countdown) return room;
   return {
     ...room,
     countdown: {
       ...room.countdown,
-      clientOffset: Number(room.countdown.serverNow) - Date.now(),
+      clientOffset: Number(room.countdown.serverNow) - requestStartedAt,
     },
   };
 }
@@ -326,6 +326,7 @@ function App() {
   const [roomReady, setRoomReady] = useState(false);
   const roomStateRevision = useRef(0);
   const roomSessionRevision = useRef(0);
+  const latestRoomServerTime = useRef(0);
   const finishedRoomId = useRef(null);
   const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
@@ -385,7 +386,7 @@ function App() {
     } else if (finishedRoomId.current !== roomId) {
       finishedRoomId.current = null;
     }
-    setRoom(withRoomClock(data.room));
+    setRoom(withRoomClock(data.room, requestStartedAt));
     setRoomReady(true);
     setGame(gameWithClockOffset(data.game, requestStartedAt));
     if (data.wallet?.availableBalance !== undefined) {
@@ -471,7 +472,7 @@ function App() {
           const latest = await request(`/api/rooms/${encodeURIComponent(roomId)}/state`, {
             signal: refreshController.signal,
           });
-          setRoom(withRoomClock(latest.room));
+          setRoom(withRoomClock(latest.room, requestStartedAt));
           setGame(gameWithClockOffset(latest.game, requestStartedAt));
           if (latest.room.status === 'FINISHED' || latest.game?.status === 'FINISHED') {
             finishedRoomId.current = roomId;
@@ -594,8 +595,12 @@ function App() {
       if (inFlight || document.visibilityState !== 'visible') return;
       inFlight = true;
       try {
+        const requestStartedAt = Date.now();
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`, { cache: 'no-store' });
         if (!active || !Array.isArray(data.taken)) return;
+        const serverTime = Number(data.serverTime);
+        if (Number.isFinite(serverTime) && serverTime < latestRoomServerTime.current) return;
+        if (Number.isFinite(serverTime)) latestRoomServerTime.current = serverTime;
         const states = new Map(data.taken.map((card) => [
           Number(card.number),
           card.isMine ? 'MINE' : 'TAKEN',
@@ -610,8 +615,24 @@ function App() {
             changed = true;
             return { ...card, state };
           });
-          return changed ? { ...current, cartelas } : current;
+          const countdown = data.selectionEndsAt == null || data.serverTime == null
+            ? current.countdown
+            : {
+              ...current.countdown,
+              deadline: Number(data.selectionEndsAt),
+              serverNow: serverTime,
+              clientOffset: serverTime - requestStartedAt,
+            };
+          return {
+            ...current,
+            cartelas: changed ? cartelas : current.cartelas,
+            currentPlayers: Number(data.playersCount ?? current.currentPlayers),
+            pot: data.pot ?? current.pot,
+            status: data.status ?? current.status,
+            countdown,
+          };
         });
+        if (['PLAYING', 'VERIFYING'].includes(data.status)) setView('game');
       } catch (reason) {
         if (active) console.warn('[Cartela sync tick skipped]:', reason);
       } finally {
@@ -619,7 +640,7 @@ function App() {
       }
     };
     syncCartelas();
-    const timer = window.setInterval(syncCartelas, 160);
+    const timer = window.setInterval(syncCartelas, 250);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -658,6 +679,9 @@ function App() {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/state`);
         const responseReceivedAt = Date.now();
         if (!active || revision !== roomStateRevision.current) return;
+        const snapshotServerTime = Number(data.room.serverNow);
+        if (Number.isFinite(snapshotServerTime) && snapshotServerTime < latestRoomServerTime.current) return;
+        if (Number.isFinite(snapshotServerTime)) latestRoomServerTime.current = snapshotServerTime;
         const roomId = String(room.id);
         const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
         const hasPendingWinner = data.room.status === 'VERIFYING'
@@ -676,7 +700,7 @@ function App() {
           telegramWebApp()?.HapticFeedback?.impactOccurred?.('medium');
         }
         lastGameCall.current = { roomId, number: currentNumber, callIndex };
-        setRoom(withRoomClock(data.room));
+        setRoom(withRoomClock(data.room, requestStartedAt));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
         if (shouldShowWinner) {
@@ -814,7 +838,7 @@ function App() {
       const responseReceivedAt = Date.now();
       if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
-      setRoom(withRoomClock(data.room));
+      setRoom(withRoomClock(data.room, requestStartedAt));
       setRoomReady(true);
       setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
       setWallet(me.wallet.availableBalance ?? me.wallet.balance ?? data.wallet.availableBalance);
@@ -868,7 +892,7 @@ function App() {
       });
       if (sessionRevision === roomSessionRevision.current) {
         roomStateRevision.current += 1;
-        setRoom(withRoomClock(data.room));
+        setRoom(withRoomClock(data.room, requestStartedAt));
         setWallet(data.wallet.availableBalance);
         if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
           setGame(gameWithClockOffset(data.game, requestStartedAt));
@@ -2013,13 +2037,13 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-btn:disabled{opacity:1}.cartela-btn.loading{border-color:#49316c;background:#281a4a;color:#fff8}
 .cartela-previews{display:grid;flex:1 1 auto;align-content:start;gap:9px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 14px 12px}
 .cartela-preview-placeholder{margin:0;padding:12px 2px;color:#8b7fa8;font-size:12px;text-align:center}
-.cartela-preview-card{padding:10px;border:1px solid #2d1b54;border-radius:12px;background:#1c1033}
-.cartela-preview-card h2{margin:0 0 8px;color:#efeaf8;font-size:13px}
-.cartela-preview-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px}
-.cartela-preview-column{display:grid;grid-template-rows:24px repeat(5,minmax(29px,1fr));gap:3px}
-.cartela-preview-column>*{display:grid;place-items:center;min-width:0;border:1px solid #33234b;border-radius:5px;background:#130a20;color:#f7f3fc;font-size:10px;font-weight:750}
-.cartela-preview-column>b{background:#281a4a;color:#d8b84c;font-size:12px}
-.cartela-preview-column .free{background:#5b4215;color:#ffe284;font-size:8px}
+.cartela-preview-card{width:100%;max-width:250px;margin:2px auto;padding:6px 8px;border:1px solid #28164b;border-radius:8px;background:#150b2b}
+.cartela-preview-card h2{margin:0 0 4px;color:#a78bfa;font-size:11px;font-weight:700}
+.cartela-preview-board{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px}
+.cartela-preview-column{display:grid;grid-template-rows:16px repeat(5,20px);gap:3px}
+.cartela-preview-column>*{display:grid;place-items:center;min-width:0;border:1px solid #2e1a54;border-radius:4px;background:#20123d;color:#f3f4f6;font-size:10px;font-weight:700}
+.cartela-preview-column>b{border:0;background:transparent;color:#fbbf24;font-size:10px;font-weight:800}
+.cartela-preview-column .free{border-color:#d97706;background:#d97706;color:#fff;font-size:8px;font-weight:900}
 .cartela-bottom-hud{position:fixed;bottom:0;left:50%;z-index:8;display:grid;gap:11px;width:min(100%,430px);padding:13px 14px calc(14px + env(safe-area-inset-bottom));transform:translateX(-50%);border-top:1px solid #2d1b54;background:#1c1033f5;box-shadow:0 -9px 25px #090414a8;backdrop-filter:blur(12px)}
 .cartela-bottom-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));align-items:center;text-align:center}
 .cartela-bottom-counts span{overflow:hidden;color:#f5f0fc;font-size:13px;font-weight:850;text-overflow:ellipsis;white-space:nowrap}
@@ -2027,7 +2051,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-leave-button:disabled{opacity:.5}
 .cartela-toast{position:fixed;bottom:calc(112px + env(safe-area-inset-bottom));left:50%;z-index:12;width:max-content;max-width:calc(100% - 30px);padding:9px 14px;transform:translateX(-50%);border:1px solid #4a3365;border-radius:11px;background:#201433;color:#fff;font-size:12px;font-weight:700;text-align:center;box-shadow:0 5px 18px #0008}
 .cartela-closed-note,.cartela-load-error{margin:8px 14px;padding:9px 10px;border:1px solid #573b2a;border-radius:10px;background:#20152a;color:#edc47c;font-size:11px}
-@media(max-height:760px){.cartela-screen-header{min-height:68px;padding-top:calc(6px + env(safe-area-inset-top));padding-bottom:8px}.cartela-grid-8col{flex-basis:170px;max-height:170px}.cartela-hud{gap:5px;padding-top:7px;padding-bottom:8px}.cartela-hud-card{min-height:48px;padding:5px 3px}.cartela-app-shell .cartela-screen{padding-bottom:calc(125px + env(safe-area-inset-bottom))}}
+@media(max-height:760px){.cartela-screen-header{min-height:68px;padding-top:calc(6px + env(safe-area-inset-top));padding-bottom:8px}.cartela-grid-8col{flex-basis:170px;max-height:170px}.cartela-hud{gap:5px;padding-top:7px;padding-bottom:8px}.cartela-hud-card{min-height:48px;padding:5px 3px}.cartela-preview-column{grid-template-rows:14px repeat(5,17px)}.cartela-app-shell .cartela-screen{padding-bottom:calc(125px + env(safe-area-inset-bottom))}}
 @media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:8px;padding-left:8px}.cartela-btn{border-radius:6px;font-size:11px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
 @media(min-width:600px){.cartela-grid-8col{gap:6px;padding-right:14px;padding-left:14px}.cartela-btn{font-size:13px}}
 .game-app-shell{width:100%;max-width:900px;height:100dvh;min-height:100dvh;overflow:hidden;padding:0;background:#0f0920}
