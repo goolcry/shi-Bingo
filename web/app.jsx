@@ -22,6 +22,7 @@ const minorUnitsToMoney = (minorUnits) => {
 };
 const telegramWebApp = () => window.Telegram?.WebApp;
 const MAX_CARTELAS_PER_PLAYER = 2;
+const TOTAL_CARTELAS = 200;
 let audioUnlocked = false;
 let audioUnlockInFlight = false;
 const callAudio = typeof Audio !== 'undefined' ? new Audio() : null;
@@ -173,7 +174,8 @@ const words = {
     roomMetrics: 'Room metrics', cartelaSelection: 'Choose a cartela', selectedCartelas: 'Selected cartela previews',
     cartela: 'Cartela', startingIn: 'STARTS IN',
     selectPreview: 'Select up to 2 cartelas to preview', roomSummary: 'Room summary',
-    cartelaClosed: 'This room no longer accepts cartela changes.', cartelaLoadFailed: 'Could not load all 100 cartelas ({count}/100).',
+    cartelaClosed: 'This room no longer accepts cartela changes.', cartelaLoadFailed: 'Could not load all 200 cartelas ({count}/200).',
+    cartelaTakenAlert: 'ይህ ካርቴላ አስቀድሞ ተይዟል! / Cartela already taken!',
     maximumCartelas: 'Maximum 2 cartelas allowed', insufficientBalance: 'Insufficient balance.',
     backToRooms: 'Back to rooms', roomStatus: "You're in the room",
     waitingPlayers: 'Waiting for players to choose their cartelas. The game starts when {count} players have selected a cartela.',
@@ -233,7 +235,8 @@ const words = {
     roomMetrics: 'የክፍል መረጃ', cartelaSelection: 'ካርቴላ ይምረጡ', selectedCartelas: 'የተመረጡ ካርቴላዎች',
     cartela: 'ካርቴላ', startingIn: 'ይጀምራል በ',
     selectPreview: 'ለማየት እስከ 2 ካርቴላ ይምረጡ', roomSummary: 'የክፍል ማጠቃለያ',
-    cartelaClosed: 'ይህ ክፍል ካርቴላ መቀየርን አይቀበልም።', cartelaLoadFailed: '100 ካርቴላዎችን መጫን አልተቻለም ({count}/100)።',
+    cartelaClosed: 'ይህ ክፍል ካርቴላ መቀየርን አይቀበልም።', cartelaLoadFailed: '200 ካርቴላዎችን መጫን አልተቻለም ({count}/200)።',
+    cartelaTakenAlert: 'ይህ ካርቴላ አስቀድሞ ተይዟል! / Cartela already taken!',
     maximumCartelas: 'ከፍተኛው 2 ካርቴላ ብቻ ነው።', insufficientBalance: 'በቂ ቀሪ ሂሳብ የለም።',
     backToRooms: 'ወደ ክፍሎች ተመለስ', roomStatus: 'ወደ ክፍሉ ገብተዋል',
     waitingPlayers: 'ተጫዋቾች ካርቴላ እስኪመርጡ ይጠብቁ። {count} ተጫዋቾች ካርቴላ ሲመርጡ ጨዋታው ይጀምራል።',
@@ -591,8 +594,11 @@ function App() {
       inFlight = true;
       try {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`, { cache: 'no-store' });
-        if (!active || !Array.isArray(data.cartelas)) return;
-        const states = new Map(data.cartelas.map((card) => [Number(card.number), card.state]));
+        if (!active || !Array.isArray(data.taken)) return;
+        const states = new Map(data.taken.map((card) => [
+          Number(card.number),
+          card.isMine ? 'MINE' : 'TAKEN',
+        ]));
         setRoom((current) => {
           if (!current || String(current.id) !== String(room.id)) return current;
           let changed = false;
@@ -611,7 +617,7 @@ function App() {
       }
     };
     syncCartelas();
-    const timer = window.setInterval(syncCartelas, 280);
+    const timer = window.setInterval(syncCartelas, 160);
     return () => {
       active = false;
       window.clearInterval(timer);
@@ -1079,7 +1085,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
     state: overrides[card.number]?.state || card.state,
   }));
   const displayedCards = loading
-    ? Array.from({ length: 100 }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
+    ? Array.from({ length: TOTAL_CARTELAS }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
     : cards;
   const mine = cards.filter((card) => card.state === 'MINE');
   const availableCartelas = cards.filter((card) => card.state === 'AVAILABLE').length;
@@ -1181,6 +1187,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
         return next;
       });
       console.warn('[Cartela toggle failed, optimistic selection rolled back]:', error);
+      if (action === 'select' && error.code === 'CARTELA_TAKEN') {
+        telegramWebApp()?.showAlert?.(t.cartelaTakenAlert);
+      }
     }
   }
 
@@ -1206,7 +1215,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
           aria-label={`${t.cartela} ${card.number}: ${t.loading}`}
         >{card.number}</button>)}
       </div>
-      : cards.length !== 100
+      : cards.length !== TOTAL_CARTELAS
       ? <div className="cartela-load-error" role="alert">{t.cartelaLoadFailed.replace('{count}', cards.length)}</div>
       : <div className="cartela-grid-8col" aria-label={t.cartelaSelection}>
         {cards.map((card) => <button
@@ -1236,7 +1245,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
     <aside className="cartela-bottom-hud" aria-label={t.roomSummary}>
       <div className="cartela-bottom-counts">
         <span>☑ {mine.length}/{MAX_CARTELAS_PER_PLAYER}</span>
-        <span>▦ {availableCartelas}/100</span>
+        <span>▦ {availableCartelas}/{TOTAL_CARTELAS}</span>
         <span>👤 {room.currentPlayers}</span>
       </div>
       <button className="cartela-leave-button" disabled={busy || !waiting} onClick={onLeave}>← {t.leave.toUpperCase()}</button>
@@ -1990,8 +1999,8 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-hud-card b{max-width:100%;overflow:hidden;margin-top:3px;color:#fff;font-size:15px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}
 .cartela-hud-card.pot b{color:#e3c24f}
 .cartela-hud-card.starts-in b{color:#ef4444}
-.cartela-grid-8col{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;padding:12px 14px}
-.cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;aspect-ratio:1;border:1px solid #49316c;border-radius:10px;background:#281a4a;color:#fff;font-size:14px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
+.cartela-grid-8col{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;max-height:52vh;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:8px 10px}
+.cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;aspect-ratio:1.15;border:1px solid #49316c;border-radius:8px;background:#281a4a;color:#fff;font-size:13px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
 .cartela-btn:active{transform:scale(.92)}
 .cartela-btn.taken{border-color:#6b1d31;background:#521626;color:#ffffff66;pointer-events:none}
 .cartela-btn.mine{border-color:#35dbad;background:#10b981;color:#fff;box-shadow:0 0 10px #10b98166}
@@ -2013,7 +2022,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-toast{position:fixed;bottom:calc(112px + env(safe-area-inset-bottom));left:50%;z-index:12;width:max-content;max-width:calc(100% - 30px);padding:9px 14px;transform:translateX(-50%);border:1px solid #4a3365;border-radius:11px;background:#201433;color:#fff;font-size:12px;font-weight:700;text-align:center;box-shadow:0 5px 18px #0008}
 .cartela-closed-note,.cartela-load-error{margin:8px 14px;padding:9px 10px;border:1px solid #573b2a;border-radius:10px;background:#20152a;color:#edc47c;font-size:11px}
 @media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:10px;padding-left:10px}.cartela-btn{border-radius:8px;font-size:12px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
-@media(min-width:600px){.cartela-grid-8col{gap:8px;padding-right:20px;padding-left:20px}.cartela-btn{font-size:15px}}
+@media(min-width:600px){.cartela-grid-8col{grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;padding-right:20px;padding-left:20px}.cartela-btn{font-size:15px}}
 .game-app-shell{width:100%;max-width:900px;height:100dvh;min-height:100dvh;overflow:hidden;padding:0;background:#0f0920}
 .game-app-shell>.content{height:100%;overflow:hidden;padding:0}
 .game-app-shell .live-game{display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto auto auto;gap:7px;width:100%;height:100dvh;min-height:0;overflow:hidden;padding:calc(7px + env(safe-area-inset-top)) 10px calc(7px + env(safe-area-inset-bottom));background:radial-gradient(ellipse at 50% -16%,#2c1945 0,transparent 48%),#0f0920}

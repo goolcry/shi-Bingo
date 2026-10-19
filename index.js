@@ -92,11 +92,64 @@ const pool = mysql.createPool({
   decimalNumbers: false,
 });
 const cartelaPrice = '10.00';
+const totalCartelas = 200;
 const roomMinPlayers = 3;
 const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
 const roomCountdownSeconds = 30;
 const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
+const activeRoomCartelaCache = new Map();
+const roomCartelaCacheWarmups = new Map();
+const cartelaSyncAuthCache = new Map();
+const cartelaSyncAuthCacheTtlMs = 30000;
+const maxCartelaSyncAuthCacheEntries = 5000;
+
+function getRoomCartelaCache(roomId) {
+  const key = String(roomId);
+  if (!activeRoomCartelaCache.has(key)) activeRoomCartelaCache.set(key, new Map());
+  return activeRoomCartelaCache.get(key);
+}
+
+async function warmRoomCartelaCache(roomId) {
+  const key = String(roomId);
+  if (activeRoomCartelaCache.has(key)) return activeRoomCartelaCache.get(key);
+  if (roomCartelaCacheWarmups.has(key)) return roomCartelaCacheWarmups.get(key);
+  const warmup = (async () => {
+    const [rows] = await pool.execute(
+      `SELECT cartela_number, owner_telegram_id FROM cartela_slots
+       WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
+      [key],
+    );
+    const cache = new Map(rows.map((row) => [
+      Number(row.cartela_number),
+      String(row.owner_telegram_id),
+    ]));
+    activeRoomCartelaCache.set(key, cache);
+    return getRoomCartelaCache(key);
+  })();
+  roomCartelaCacheWarmups.set(key, warmup);
+  try {
+    return await warmup;
+  } finally {
+    roomCartelaCacheWarmups.delete(key);
+  }
+}
+
+function releaseRoomCartelaCache(roomId) {
+  const key = String(roomId);
+  activeRoomCartelaCache.delete(key);
+  roomCartelaCacheWarmups.delete(key);
+}
+
+const cartelaTakenMessage = 'ይህ ካርቴላ አስቀድሞ ተይዟል! / Cartela already taken!';
+
+function sendCartelaTaken(res) {
+  return res.status(409).json({
+    error: 'CARTELA_TAKEN',
+    code: 'CARTELA_TAKEN',
+    message: cartelaTakenMessage,
+  });
+}
 
 let schemaPromise;
 function initializeSchema() {
@@ -1980,6 +2033,44 @@ async function authenticatedTelegramUser(req, res, next) {
   }
 }
 
+async function authenticatedCartelaSyncUser(req, res, next) {
+  try {
+    req.telegramUser = verifyInitData(req.get('Authorization')?.replace(/^tma\s+/i, ''));
+  } catch (error) {
+    return res.status(error.status || 401).json({ error: error.message });
+  }
+  try {
+    const telegramId = String(req.telegramUser.id);
+    const expiresAt = cartelaSyncAuthCache.get(telegramId);
+    if (expiresAt && expiresAt > Date.now()) return next();
+
+    await initializeSchema();
+    const [[user]] = await pool.execute(
+      'SELECT phone_number FROM users WHERE telegram_id = ?',
+      [telegramId],
+    );
+    if (!user?.phone_number) {
+      return res.status(403).json({
+        error: 'Share and verify your phone number with the bot before using the game.',
+        code: 'PHONE_VERIFICATION_REQUIRED',
+      });
+    }
+    if (cartelaSyncAuthCache.size >= maxCartelaSyncAuthCacheEntries) {
+      const now = Date.now();
+      for (const [cachedId, expires] of cartelaSyncAuthCache) {
+        if (expires <= now) cartelaSyncAuthCache.delete(cachedId);
+      }
+      if (cartelaSyncAuthCache.size >= maxCartelaSyncAuthCacheEntries) {
+        cartelaSyncAuthCache.delete(cartelaSyncAuthCache.keys().next().value);
+      }
+    }
+    cartelaSyncAuthCache.set(telegramId, Date.now() + cartelaSyncAuthCacheTtlMs);
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+}
+
 async function optionalTelegramUser(req, res, next) {
   const authorization = req.get('Authorization');
   if (!authorization) {
@@ -2062,12 +2153,13 @@ async function ensureOpenRoom(creatorTelegramId = null) {
       [cartelaPrice, roomMinPlayers, roomMaxPlayers, creatorTelegramId ? String(creatorTelegramId) : null],
     );
     const roomId = String(inserted.insertId);
-    const slots = Array.from({ length: 100 }, (_, index) => [
+    const slots = Array.from({ length: totalCartelas }, (_, index) => [
       roomId, index + 1, JSON.stringify(generateCartela()),
     ]);
     await connection.query('INSERT INTO cartela_slots (room_id, cartela_number, numbers) VALUES ?', [slots]);
     await connection.execute('UPDATE bingo_rooms SET room_number = ? WHERE id = ?', [roomId, roomId]);
     await connection.commit();
+    activeRoomCartelaCache.set(roomId, new Map());
     return roomId;
   } catch (error) {
     await connection.rollback().catch(() => {});
@@ -2173,7 +2265,7 @@ async function repairRoomCartelas(connection, roomId) {
     );
   }
 
-  for (let number = 1; number <= 100; number += 1) {
+  for (let number = 1; number <= totalCartelas; number += 1) {
     if (!present.has(number)) missing.push([roomId, number, JSON.stringify(generateCartela())]);
   }
   if (missing.length) {
@@ -2484,6 +2576,7 @@ async function startDueRoom(roomId) {
         [JSON.stringify(drawOrder), roomId],
       );
       await connection.commit();
+      releaseRoomCartelaCache(roomId);
       return 'started';
     }
 
@@ -2551,7 +2644,8 @@ async function roomSnapshot(roomId, telegramId) {
      WHERE room_id = ? ORDER BY cartela_number`,
     [roomId],
   );
-  let hasInvalidCartelas = cards.length !== 100;
+  let hasInvalidCartelas = cards.length !== totalCartelas
+    || cards.some((card, index) => Number(card.cartela_number) !== index + 1);
   for (const card of cards) {
     try {
       parseCartela(card.numbers);
@@ -2859,7 +2953,9 @@ app.get('/api/rooms/:id/cartelas', authenticatedTelegramUser, async (req, res, n
        ORDER BY s.cartela_number`,
       [req.params.id],
     );
-    if (rows.length !== 100) throw Object.assign(new Error('Room cartelas are unavailable.'), { status: 404 });
+    if (rows.length !== totalCartelas) {
+      throw Object.assign(new Error('Room cartelas are unavailable.'), { status: 404 });
+    }
     const telegramId = String(req.telegramUser.id);
     res.json({
       cartelas: rows.map((row) => {
@@ -2875,30 +2971,22 @@ app.get('/api/rooms/:id/cartelas', authenticatedTelegramUser, async (req, res, n
   }
 });
 
-app.get('/api/rooms/:id/cartelas-sync', authenticatedTelegramUser, async (req, res, next) => {
+app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req, res) => {
   res.set({
-    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, private',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
     Pragma: 'no-cache',
     Expires: '0',
-    'Surrogate-Control': 'no-store',
   });
   try {
     await initializeSchema();
-    const [rows] = await pool.execute(
-      `SELECT cartela_number, owner_telegram_id
-       FROM cartela_slots
-       WHERE room_id = ? AND owner_telegram_id IS NOT NULL
-       ORDER BY cartela_number`,
-      [req.params.id],
-    );
     const telegramId = String(req.telegramUser.id);
+    const cache = await warmRoomCartelaCache(req.params.id);
+    const taken = Array.from(cache, ([number, owner]) => ({
+      number,
+      isMine: owner === telegramId,
+    }));
     res.json({
-      cartelas: rows.map((row) => {
-        return {
-          number: Number(row.cartela_number),
-          state: String(row.owner_telegram_id) === telegramId ? 'MINE' : 'TAKEN',
-        };
-      }),
+      taken,
     });
   } catch (error) {
     console.error(`[Cartela sync failed] room ${req.params.id}:`, error);
@@ -2907,15 +2995,25 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedTelegramUser, async (req, r
 });
 
 async function selectCartelaHandler(req, res, next) {
-  const connection = await pool.getConnection();
+  let connection;
   let transactionStarted = false;
+  let cartelaCache;
   try {
+    const number = Number(req.params.number);
+    if (!Number.isInteger(number) || number < 1 || number > totalCartelas) {
+      throw Object.assign(new Error(`Cartela number must be from 1 to ${totalCartelas}.`), { status: 400 });
+    }
+    const roomKey = String(req.params.id);
+    const telegramId = String(req.telegramUser.id);
+    const cached = activeRoomCartelaCache.get(roomKey);
+    if (cached?.has(number) && cached.get(number) !== telegramId) return sendCartelaTaken(res);
+
+    await initializeSchema();
     await upsertUser(req.telegramUser);
     await startDueRoom(req.params.id);
-    const number = Number(req.params.number);
-    if (!Number.isInteger(number) || number < 1 || number > 100) {
-      throw Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 });
-    }
+    cartelaCache = await warmRoomCartelaCache(roomKey);
+    if (cartelaCache.has(number) && cartelaCache.get(number) !== telegramId) return sendCartelaTaken(res);
+    connection = await pool.getConnection();
     await connection.beginTransaction();
     transactionStarted = true;
     const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [req.params.id]);
@@ -2952,7 +3050,8 @@ async function selectCartelaHandler(req, res, next) {
           return;
         }
       }
-      throw Object.assign(new Error('That cartela has already been taken.'), {
+      cartelaCache.set(number, String(slot.owner_telegram_id));
+      throw Object.assign(new Error(cartelaTakenMessage), {
         status: 409,
         code: 'CARTELA_TAKEN',
       });
@@ -3008,16 +3107,21 @@ async function selectCartelaHandler(req, res, next) {
     );
     await connection.commit();
     transactionStarted = false;
+    cartelaCache.set(number, telegramId);
     res.json({
       selected: true,
       room: (await roomSnapshot(room.id, req.telegramUser.id)).room,
       wallet: { availableBalance: await getAvailableBalance(String(req.telegramUser.id)) },
     });
   } catch (error) {
-    if (transactionStarted) await connection.rollback().catch(() => {});
+    if (transactionStarted) {
+      await connection.rollback().catch(() => {});
+      transactionStarted = false;
+    }
+    if (error.code === 'CARTELA_TAKEN') return sendCartelaTaken(res);
     next(error);
   } finally {
-    connection.release();
+    connection?.release();
   }
 }
 
@@ -3029,8 +3133,8 @@ async function deselectCartelaHandler(req, res, next) {
     await initializeSchema();
     await startDueRoom(req.params.id);
     const number = Number(req.params.number);
-    if (!Number.isInteger(number) || number < 1 || number > 100) {
-      throw Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 });
+    if (!Number.isInteger(number) || number < 1 || number > totalCartelas) {
+      throw Object.assign(new Error(`Cartela number must be from 1 to ${totalCartelas}.`), { status: 400 });
     }
     await connection.beginTransaction();
     const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [req.params.id]);
@@ -3083,6 +3187,7 @@ async function deselectCartelaHandler(req, res, next) {
       ],
     );
     await connection.commit();
+    activeRoomCartelaCache.get(String(room.id))?.delete(number);
     res.json({
       selected: false,
       room: (await roomSnapshot(room.id, req.telegramUser.id)).room,
@@ -3101,8 +3206,8 @@ app.post('/api/rooms/:id/cartelas/:number/deselect', authenticatedTelegramUser, 
 app.post('/api/rooms/:id/cartela', authenticatedTelegramUser, (req, res, next) => {
   const cartelaNumber = Number(req.body?.cartelaNumber);
   const { action } = req.body || {};
-  if (!Number.isInteger(cartelaNumber) || cartelaNumber < 1 || cartelaNumber > 100) {
-    return next(Object.assign(new Error('Cartela number must be from 1 to 100.'), { status: 400 }));
+  if (!Number.isInteger(cartelaNumber) || cartelaNumber < 1 || cartelaNumber > totalCartelas) {
+    return next(Object.assign(new Error(`Cartela number must be from 1 to ${totalCartelas}.`), { status: 400 }));
   }
   if (action !== 'select' && action !== 'deselect') {
     return next(Object.assign(new Error('Cartela action must be select or deselect.'), { status: 400 }));
@@ -3167,6 +3272,8 @@ app.post('/api/rooms/:id/leave', authenticatedTelegramUser, async (req, res, nex
       [room.id, String(req.telegramUser.id)],
     );
     await connection.commit();
+    const cache = activeRoomCartelaCache.get(String(room.id));
+    for (const reservation of reservations) cache?.delete(Number(reservation.cartela_number));
     res.json({ left: true });
   } catch (error) {
     try { await connection.rollback(); } catch { /* The transaction may already be closed. */ }
