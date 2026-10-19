@@ -329,6 +329,7 @@ function App() {
   const finishedRoomId = useRef(null);
   const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
+  const pendingCartelaToggles = useRef(new Set());
   const activeSelectionMutations = useRef(0);
   const [game, setGame] = useState(null);
   const [pendingBingoClaim, setPendingBingoClaim] = useState(null);
@@ -603,6 +604,7 @@ function App() {
           if (!current || String(current.id) !== String(room.id)) return current;
           let changed = false;
           const cartelas = current.cartelas.map((card) => {
+            if (pendingCartelaToggles.current.has(`${room.id}:${Number(card.number)}`)) return card;
             const state = states.get(Number(card.number)) || 'AVAILABLE';
             if (state === card.state) return card;
             changed = true;
@@ -851,6 +853,8 @@ function App() {
       throw new Error('This cartela is no longer available.');
     }
     const roomId = room.id;
+    const toggleKey = `${roomId}:${Number(card.number)}`;
+    pendingCartelaToggles.current.add(toggleKey);
     const sessionRevision = roomSessionRevision.current;
     activeSelectionMutations.current += 1;
     setBusy(true);
@@ -892,6 +896,7 @@ function App() {
       }
       throw reason;
     } finally {
+      pendingCartelaToggles.current.delete(toggleKey);
       activeSelectionMutations.current -= 1;
       if (activeSelectionMutations.current === 0 && sessionRevision === roomSessionRevision.current) setBusy(false);
     }
@@ -1985,9 +1990,10 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-room-footer>div>b{overflow:hidden;color:#f7f1fd;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
 .cartela-room-footer>div>small{color:#a996ba;font-size:7px;font-weight:850;letter-spacing:.08em}
 .cartela-room-footer>.danger-button{grid-column:1/-1;justify-content:center;width:100%;margin:0;padding:10px;font-size:10px}
-.cartela-app-shell{max-width:430px;padding:0 0 calc(112px + env(safe-area-inset-bottom));background:#0f0920}
-.cartela-app-shell>.content{padding:0}
-.cartela-app-shell .cartela-screen{min-height:100dvh;padding-bottom:8px;background:#0f0920}
+.cartela-app-shell{width:100%;height:100dvh;max-width:430px;overflow:hidden;padding:0;background:#0f0920}
+.cartela-app-shell>.content{height:100%;overflow:hidden;padding:0}
+.cartela-app-shell .cartela-screen{display:flex;height:100dvh;max-height:100dvh;min-height:0;flex-direction:column;overflow:hidden;box-sizing:border-box;padding:0 0 calc(135px + env(safe-area-inset-bottom));background:#0f0920}
+.cartela-screen-header,.cartela-hud,.cartela-closed-note{flex:0 0 auto}
 .cartela-screen-header{position:relative;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;min-height:88px;padding:calc(10px + env(safe-area-inset-top)) 14px 12px;background:#0f0920;text-align:center}
 .cartela-back{justify-self:start;padding:8px 10px;border:0;border-radius:22px;background:#0b0716;color:#fff;font-size:14px;font-weight:700}
 .cartela-brand-title{display:grid;gap:3px}
@@ -1999,13 +2005,13 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-hud-card b{max-width:100%;overflow:hidden;margin-top:3px;color:#fff;font-size:15px;font-variant-numeric:tabular-nums;text-overflow:ellipsis;white-space:nowrap}
 .cartela-hud-card.pot b{color:#e3c24f}
 .cartela-hud-card.starts-in b{color:#ef4444}
-.cartela-grid-8col{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:6px;max-height:52vh;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:8px 10px}
-.cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;aspect-ratio:1.15;border:1px solid #49316c;border-radius:8px;background:#281a4a;color:#fff;font-size:13px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
+.cartela-grid-8col{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-auto-rows:32px;flex:0 0 220px;gap:4px;max-height:220px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:6px 10px;background:#140a28;border:1px solid #28174a;border-radius:10px;margin:0 10px 8px}
+.cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;height:32px;padding:0;border:1px solid #49316c;border-radius:6px;background:#281a4a;color:#fff;font-size:12px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
 .cartela-btn:active{transform:scale(.92)}
-.cartela-btn.taken{border-color:#6b1d31;background:#521626;color:#ffffff66;pointer-events:none}
-.cartela-btn.mine{border-color:#35dbad;background:#10b981;color:#fff;box-shadow:0 0 10px #10b98166}
+.cartela-btn.taken{border-color:#dc2626;background:#ef4444;color:#fff;opacity:.9;pointer-events:none}
+.cartela-btn.mine{border-color:#059669;background:#10b981;color:#fff;box-shadow:0 0 8px #10b98199}
 .cartela-btn:disabled{opacity:1}.cartela-btn.loading{border-color:#49316c;background:#281a4a;color:#fff8}
-.cartela-previews{display:grid;gap:9px;padding:2px 14px 18px}
+.cartela-previews{display:grid;flex:1 1 auto;align-content:start;gap:9px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 14px 12px}
 .cartela-preview-placeholder{margin:0;padding:12px 2px;color:#8b7fa8;font-size:12px;text-align:center}
 .cartela-preview-card{padding:10px;border:1px solid #2d1b54;border-radius:12px;background:#1c1033}
 .cartela-preview-card h2{margin:0 0 8px;color:#efeaf8;font-size:13px}
@@ -2021,8 +2027,9 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-leave-button:disabled{opacity:.5}
 .cartela-toast{position:fixed;bottom:calc(112px + env(safe-area-inset-bottom));left:50%;z-index:12;width:max-content;max-width:calc(100% - 30px);padding:9px 14px;transform:translateX(-50%);border:1px solid #4a3365;border-radius:11px;background:#201433;color:#fff;font-size:12px;font-weight:700;text-align:center;box-shadow:0 5px 18px #0008}
 .cartela-closed-note,.cartela-load-error{margin:8px 14px;padding:9px 10px;border:1px solid #573b2a;border-radius:10px;background:#20152a;color:#edc47c;font-size:11px}
-@media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:10px;padding-left:10px}.cartela-btn{border-radius:8px;font-size:12px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
-@media(min-width:600px){.cartela-grid-8col{grid-template-columns:repeat(8,minmax(0,1fr));gap:8px;padding-right:20px;padding-left:20px}.cartela-btn{font-size:15px}}
+@media(max-height:760px){.cartela-screen-header{min-height:68px;padding-top:calc(6px + env(safe-area-inset-top));padding-bottom:8px}.cartela-grid-8col{flex-basis:170px;max-height:170px}.cartela-hud{gap:5px;padding-top:7px;padding-bottom:8px}.cartela-hud-card{min-height:48px;padding:5px 3px}.cartela-app-shell .cartela-screen{padding-bottom:calc(125px + env(safe-area-inset-bottom))}}
+@media(max-width:360px){.cartela-grid-8col{gap:4px;padding-right:8px;padding-left:8px}.cartela-btn{border-radius:6px;font-size:11px}.cartela-hud{gap:5px;padding-right:10px;padding-left:10px}.cartela-hud-card small{font-size:8px}.cartela-hud-card b{font-size:13px}}
+@media(min-width:600px){.cartela-grid-8col{gap:6px;padding-right:14px;padding-left:14px}.cartela-btn{font-size:13px}}
 .game-app-shell{width:100%;max-width:900px;height:100dvh;min-height:100dvh;overflow:hidden;padding:0;background:#0f0920}
 .game-app-shell>.content{height:100%;overflow:hidden;padding:0}
 .game-app-shell .live-game{display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto auto auto;gap:7px;width:100%;height:100dvh;min-height:0;overflow:hidden;padding:calc(7px + env(safe-area-inset-top)) 10px calc(7px + env(safe-area-inset-bottom));background:radial-gradient(ellipse at 50% -16%,#2c1945 0,transparent 48%),#0f0920}

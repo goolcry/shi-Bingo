@@ -2980,13 +2980,26 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
   try {
     await initializeSchema();
     const telegramId = String(req.telegramUser.id);
-    const cache = await warmRoomCartelaCache(req.params.id);
+    const roomId = String(req.params.id);
+    const [rows] = await pool.execute(
+      `SELECT cartela_number, owner_telegram_id
+       FROM cartela_slots
+       WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
+      [roomId],
+    );
+    const cache = new Map(rows.map((row) => [
+      Number(row.cartela_number),
+      String(row.owner_telegram_id),
+    ]));
+    activeRoomCartelaCache.set(roomId, cache);
     const taken = Array.from(cache, ([number, owner]) => ({
-      number,
+      number: Number(number),
+      userId: owner,
       isMine: owner === telegramId,
     }));
     res.json({
       taken,
+      currentUserId: telegramId,
     });
   } catch (error) {
     console.error(`[Cartela sync failed] room ${req.params.id}:`, error);
@@ -4160,7 +4173,7 @@ const miniAppHtml = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#100c1d">
   <title>SHISHO BINGO</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
@@ -4430,7 +4443,7 @@ const reactMiniAppHtml = `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="theme-color" content="#08030f">
   <meta name="description" content="Play SHISHO BINGO in Telegram.">
   <title>SHISHO BINGO</title>
