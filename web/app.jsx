@@ -186,7 +186,7 @@ const words = {
     singleWinner: 'We have a winner! 🎉', noWinner: 'The game ended without a winning cartela.',
     winningCartela: 'WINNING CARTELA #{number}', claimedCartela: 'CLAIMED CARTELA #{number}', calls: 'CALLS', verified: '✓ Verified',
     nextRound: 'Next round in {seconds}s...', playerProfile: 'PLAYER PROFILE',
-    gamesWon: 'Games won', winnings: 'Winnings', winRate: 'Win rate', referrals: 'Referrals',
+    gamesWon: 'Games won', gamesPlayed: 'Games played', winnings: 'Winnings', winRate: 'Win rate', referrals: 'Referrals',
     successfulReferrals: 'Successful referrals:',
     availableBalance: 'Available balance', paymentMethod: 'Payment method', amountBirr: 'Amount (BIRR)',
     transactionReference: 'Transaction reference', submitApproval: 'Submit for approval',
@@ -247,7 +247,7 @@ const words = {
     singleWinner: 'አሸናፊ አለን! 🎉', noWinner: 'አሸናፊ ካርቴላ ሳይኖር ጨዋታው ተጠናቋል።',
     winningCartela: 'አሸናፊ ካርቴላ #{number}', claimedCartela: 'የቀረበው ካርቴላ #{number}', calls: 'ጥሪዎች', verified: '✓ ተረጋግጧል',
     nextRound: 'ቀጣዩ ዙር በ{seconds} ሰከንድ...', playerProfile: 'የተጫዋች መገለጫ',
-    gamesWon: 'ያሸነፉ ጨዋታዎች', winnings: 'ያሸነፉት', winRate: 'የማሸነፍ መጠን', referrals: 'ግብዣዎች',
+    gamesWon: 'ያሸነፉ ጨዋታዎች', gamesPlayed: 'የተጫወቱ ጨዋታዎች', winnings: 'ያሸነፉት', winRate: 'የማሸነፍ መጠን', referrals: 'ግብዣዎች',
     inviteCopied: 'የግብዣ አገናኙ ተቀድቷል።', successfulReferrals: 'የተሳኩ ግብዣዎች:',
     availableBalance: 'ያለው ቀሪ ሂሳብ', paymentMethod: 'የክፍያ ዘዴ', amountBirr: 'መጠን (ብር)',
     transactionReference: 'የግብይት ማጣቀሻ', submitApproval: 'ለማጽደቅ አስገባ',
@@ -1023,7 +1023,7 @@ function App() {
       />}
       {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
-      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
+      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onWallet={() => go('wallet')} onHistory={() => go('history')} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
       {view === 'wallet' && <WalletScreen wallet={wallet} t={t} onRefresh={() => Promise.all([refreshWallet(), request('/api/history')]).catch((reason) => setError(reason.message))} onError={setError} />}
     </main>
 
@@ -1685,7 +1685,7 @@ function HistoryScreen({ history, t }) {
   </>;
 }
 
-function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, appInfo, onRanks, onRefresh }) {
+function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, appInfo, onWallet, onHistory, onRanks, onRefresh }) {
   const [roomMessage, setRoomMessage] = useState('');
   const info = profile?.user || user;
   async function shareInvite() {
@@ -1700,18 +1700,35 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, a
       if (error.name !== 'AbortError') setRoomMessage(t.shareFailed);
     }
   }
-  return <><div className="eyebrow">{t.playerProfile}</div><h1 className="page-title">👤 {t.profile}</h1>
-    <section className="profile-card panel"><div className="avatar">{(info?.firstName || 'S').slice(0, 1).toUpperCase()}</div>
-      <h2>{[info?.firstName, info?.lastName].filter(Boolean).join(' ') || t.loading}</h2><p className="muted">{info?.username ? `@${info.username} · ` : ''}{t.playerId} {info?.id || '—'}</p>
-      {info?.phoneNumber && <p className="muted">📱 {info.phoneNumber}</p>}
-      <div className="profile-stats">
-        <Stat label={t.balance} value={wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`} />
-        <Stat label={t.gamesWon} value={profile?.games?.won ?? '—'} />
-        <Stat label={t.winnings} value={profile?.games?.winnings ? `${money(profile.games.winnings)} ${t.currency}` : '—'} />
-        <Stat label={t.winRate} value={`${profile?.games?.winRate ?? '—'}%`} />
-        <Stat label={t.referrals} value={profile?.referrals?.successful ?? '—'} />
+  const winRate = Math.min(100, Math.max(0, Number(profile?.games?.winRate) || 0));
+  return <div className="profile-dashboard">
+    <div className="eyebrow">{t.playerProfile}</div><h1 className="page-title">👤 {t.profile}</h1>
+    <section className="profile-hero panel">
+      <div className="profile-identity">
+        <div className="avatar">{(info?.firstName || 'S').slice(0, 1).toUpperCase()}</div>
+        <div className="profile-name"><span className="profile-kicker">SHISHO PLAYER</span>
+          <h2>{[info?.firstName, info?.lastName].filter(Boolean).join(' ') || t.loading}</h2>
+          <p>{info?.username ? `@${info.username} · ` : ''}{t.playerId} {info?.id || '—'}</p>
+        </div>
+        <button type="button" className="profile-refresh" disabled={busy} onClick={onRefresh} aria-label={t.refresh}>↻</button>
       </div>
-      <button disabled={busy} className="outline-button" onClick={onRefresh}>↻ {t.refresh}</button>
+      {info?.phoneNumber && <div className="profile-phone">📱 {info.phoneNumber}</div>}
+      <button type="button" className="profile-balance" onClick={onWallet}>
+        <span><small>{t.availableBalance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`}</b></span>
+        <span className="profile-balance-action">＋ {t.deposit}</span>
+      </button>
+      <div className="profile-winrate"><div><span>{t.winRate}</span><b>{winRate.toFixed(1)}%</b></div><div className="profile-progress"><i style={{ width: `${winRate}%` }} /></div></div>
+      <div className="profile-quick-actions">
+        <button type="button" onClick={onWallet}><span>💳</span>{t.deposit}</button>
+        <button type="button" onClick={onRanks}><span>🏆</span>{t.ranks}</button>
+        <button type="button" onClick={onHistory}><span>📜</span>{t.history}</button>
+      </div>
+    </section>
+    <section className="profile-stats" aria-label={t.playerProfile}>
+      <Stat label={t.gamesWon} value={profile?.games?.won ?? '—'} icon="🏆" onClick={onRanks} />
+      <Stat label={t.winnings} value={profile?.games?.winnings ? `${money(profile.games.winnings)} ${t.currency}` : '—'} icon="💰" onClick={onWallet} />
+      <Stat label={t.referrals} value={profile?.referrals?.successful ?? '—'} icon="🤝" onClick={shareInvite} />
+      <Stat label={t.gamesPlayed || 'Games played'} value={profile?.games?.played ?? '—'} icon="🎱" onClick={onHistory} />
     </section>
     <section className="panel settings"><h2>{t.settingsTitle}</h2><div className="row"><span>{t.language}</span>
       <div className="language-control"><button className={info?.language === 'en' ? 'selected' : ''} onClick={() => onLanguage('en')}>🇬🇧 {t.languageEnglish}</button><button className={info?.language === 'am' ? 'selected' : ''} onClick={() => onLanguage('am')}>🇪🇹 {t.languageAmharic}</button></div>
@@ -1727,11 +1744,11 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, a
       <p className="muted">{t.successfulReferrals} {referral?.successful ?? '—'}</p>
       {roomMessage && <p className="muted" role="status">{roomMessage}</p>}
     </section>
-  </>;
+  </div>;
 }
 
-function Stat({ label, value }) {
-  return <div className="stat"><small>{label}</small><b>{value}</b></div>;
+function Stat({ label, value, icon, onClick }) {
+  return <button type="button" className="stat" onClick={onClick}><span className="stat-icon">{icon}</span><small>{label}</small><b>{value}</b><span className="stat-link">↗</span></button>;
 }
 
 function WalletScreen({ wallet, t, onRefresh, onError }) {
@@ -1815,7 +1832,7 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
       <p className="muted">{t.minWithdrawal}</p>
       <form onSubmit={submitWithdrawal}>
         <label>{t.amountBirr}<input required inputMode="decimal" value={withdrawAmount} onChange={(event) => setWithdrawAmount(event.target.value)} /></label>
-        <label>{t.paymentMethod}<select value={withdrawMethod} onChange={(event) => setWithdrawMethod(event.target.value)}><option value="TELEBIRR">Telebirr</option><option value="CBE">CBE</option></select></label>
+        <label>{t.paymentMethod}<input value="Telebirr" readOnly /></label>
         <label>{t.accountDetails}<input required minLength="5" maxLength="191" value={payoutDetails} onChange={(event) => setPayoutDetails(event.target.value)} /></label>
         <label>{t.destinationName}<input required minLength="2" maxLength="255" value={destinationName} onChange={(event) => setDestinationName(event.target.value)} /></label>
         <button className="primary-button" disabled={busy}>{busy ? t.loading : t.withdraw}</button>
@@ -2208,6 +2225,8 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .play-smart-pill p{margin:0;color:#b9aacc;font-size:11px;line-height:1.4}
 .play-smart-pill>span{font-size:24px}
 @media(max-width:370px){.play-screen .stake-entry-card{gap:10px;margin:0 2px;padding:12px}.stake-header-row{gap:7px}.stake-icon-badge{width:42px;height:42px;font-size:20px}.stake-info-text h3{font-size:15px!important}.stake-info-text small{font-size:9px}.btn-enter-game{min-height:38px;padding:8px 10px;font-size:11px}.stake-metrics-row{gap:5px}.stake-metrics-row .metric-box{min-height:66px}.stake-metrics-row .metric-value{font-size:11px}.stake-metrics-row .metric-label{font-size:7px}.play-screen .play-smart-pill{min-height:64px;padding:9px}.play-smart-pill h2{font-size:11px}.play-smart-pill p{font-size:9px}}
+.profile-dashboard{display:grid;gap:12px;padding-bottom:12px}.profile-dashboard>.page-title{margin:0 0 2px}.profile-hero{position:relative;overflow:hidden;display:grid;gap:14px;padding:16px;border-color:#654a8a;background:radial-gradient(ellipse at 100% 0,#533283 0,transparent 48%),linear-gradient(145deg,#211034,#120a20 72%)}.profile-identity{display:flex;align-items:center;gap:12px;min-width:0}.profile-identity .avatar{flex:none;width:58px;height:58px;border-color:#facc32;background:linear-gradient(145deg,#64439a,#2a1744);color:#ffe36a;box-shadow:0 0 18px #8b5cf644}.profile-name{flex:1;min-width:0}.profile-kicker{color:#c1a5ec;font-size:8px;font-weight:900;letter-spacing:.15em}.profile-name h2{overflow:hidden;margin:2px 0;color:#fff;font-size:18px;text-overflow:ellipsis;white-space:nowrap}.profile-name p{overflow:hidden;margin:0;color:#b9aaca;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.profile-refresh{display:grid;place-items:center;flex:none;width:34px;height:34px;border:1px solid #664e81;border-radius:11px;background:#ffffff0c;color:#f0d773;font-size:20px;transition:transform .2s ease,background .2s ease}.profile-refresh:active{transform:rotate(35deg) scale(.94);background:#ffffff20}.profile-phone{margin-top:-8px;color:#baa9d0;font-size:10px}.profile-balance{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:12px;border:1px solid #66512b;border-radius:14px;background:linear-gradient(110deg,#2a2015,#1d1423);text-align:left}.profile-balance>span:first-child{display:grid;gap:2px}.profile-balance small{color:#c3b4a0;font-size:9px}.profile-balance b{color:#ffe36a;font-size:20px;font-variant-numeric:tabular-nums}.profile-balance-action{flex:none;padding:7px 9px;border-radius:9px;background:#facc32;color:#1c1302;font-size:10px;font-weight:900}.profile-winrate{display:grid;gap:6px}.profile-winrate>div:first-child{display:flex;justify-content:space-between;color:#bcaed0;font-size:10px}.profile-winrate b{color:#fff}.profile-progress{height:6px;overflow:hidden;border-radius:9px;background:#ffffff16}.profile-progress i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8b5cf6,#facc32);transition:width .5s ease}.profile-quick-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.profile-quick-actions button{display:grid;justify-items:center;gap:5px;min-width:0;padding:10px 4px;border:1px solid #433154;border-radius:12px;background:#ffffff08;color:#e8dff2;font-size:10px;font-weight:750;transition:transform .15s ease,border-color .15s ease,background .15s ease}.profile-quick-actions button:active{transform:scale(.96);border-color:#9875c4;background:#ffffff14}.profile-quick-actions button span{font-size:18px}.profile-dashboard>.profile-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.profile-stats .stat{position:relative;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;align-items:center;gap:4px 8px;min-width:0;padding:12px;border:1px solid #382848;border-radius:13px;background:linear-gradient(145deg,#1b1028,#120b1d);text-align:left;transition:transform .15s ease,border-color .15s ease}.profile-stats .stat:active{transform:translateY(1px);border-color:#8b5cf6}.profile-stats .stat-icon{grid-row:1 / span 2;font-size:20px}.profile-stats .stat small{overflow:hidden;grid-column:2 / span 2;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat b{overflow:hidden;grid-column:2;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat-link{grid-column:3;grid-row:2;color:#a78bfa;font-size:12px}.profile-dashboard>.settings{border-color:#433154;background:linear-gradient(145deg,#1b1028,#120b1d)}.profile-dashboard .settings h2{margin:0 0 8px;font-size:15px}.profile-dashboard .language-control button{border:1px solid #49365c;border-radius:9px;background:#140b20;color:#cbbbdc;padding:7px 9px;font-size:10px}.profile-dashboard .language-control button.selected{border-color:#facc32;background:#332713;color:#ffe36a}
+@media(min-width:600px){.profile-dashboard{gap:14px}.profile-hero{padding:20px}.profile-dashboard>.profile-stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
 `;
 
 createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);

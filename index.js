@@ -63,16 +63,10 @@ const config = {
     {
       method: 'TELEBIRR',
       label: 'Telebirr',
-      account: process.env.TELEBIRR_ACCOUNT || '',
-      accountName: process.env.TELEBIRR_ACCOUNT_NAME || '',
+      account: '0990957900',
+      accountName: 'Shewaye Shetarage',
     },
-    {
-      method: 'CBE',
-      label: 'CBE',
-      account: process.env.CBE_ACCOUNT || '',
-      accountName: process.env.CBE_ACCOUNT_NAME || '',
-    },
-  ].filter((method) => method.account && method.accountName),
+  ],
   withdrawalMinimum: '50.00',
   referralReward: validConfiguredMoney(process.env.REFERRAL_REWARD || '0'),
 };
@@ -547,7 +541,7 @@ const text = {
     enterDepositReference: 'Enter the transaction/reference ID from your payment.',
     withdrawalInfo: (balance, minimum) => `Available balance: ${balance} BIRR\nMinimum withdrawal: ${minimum} BIRR\nFee: 0 BIRR\nPending requests reserve their amount until approved or rejected.\n\nEnter the amount to withdraw, or Cancel.`,
     withdrawalMethod: 'Choose how you want to receive the withdrawal:',
-    withdrawalDetails: 'Enter your Telebirr phone number or CBE account number.',
+    withdrawalDetails: 'Enter your Telebirr phone number.',
     withdrawalDestinationName: '👤 Please enter the Destination Name (Full Account Holder Name):\nእባክዎ የባንክ/ቴሌብር አካውንቱ የተመዘገበበትን ትክክለኛ ስም ያስገቡ፡',
     withdrawalConfirm: (amount, method, details, destinationName) => `Confirm withdrawal request:\nAmount: ${amount} BIRR\nFee: 0 BIRR\nMethod: ${method}\nAccount number: ${details}\nDestination name: ${destinationName}`,
     withdrawalPending: (id) => `Withdrawal request #${id} is pending admin review. The requested funds are reserved; no payout has been made yet.`,
@@ -598,7 +592,7 @@ const text = {
     enterDepositReference: 'ከክፍያዎ የግብይት መለያ ያስገቡ።',
     withdrawalInfo: (balance, minimum) => `ያለ ቀሪ ሂሳብ፦ ${balance} ብር\nዝቅተኛ የማውጫ መጠን፦ ${minimum} ብር\nክፍያ፦ 0 ብር\nየሚጠባበቁ ጥያቄዎች እስኪጸድቁ ወይም ውድቅ እስኪደረጉ ድረስ ገንዘቡን ይይዛሉ።\n\nለማውጣት የሚፈልጉትን መጠን ያስገቡ ወይም Cancel ይጫኑ።`,
     withdrawalMethod: 'ገንዘቡን የሚቀበሉበትን ዘዴ ይምረጡ፦',
-    withdrawalDetails: 'የቴሌብር ስልክ ቁጥርዎን ወይም የCBE ሂሳብ ቁጥር ያስገቡ።',
+    withdrawalDetails: 'የቴሌብር ስልክ ቁጥርዎን ያስገቡ።',
     withdrawalDestinationName: '👤 Please enter the Destination Name (Full Account Holder Name):\nእባክዎ የባንክ/ቴሌብር አካውንቱ የተመዘገበበትን ትክክለኛ ስም ያስገቡ፡',
     withdrawalConfirm: (amount, method, details, destinationName) => `የገንዘብ ማውጫ ጥያቄውን ያረጋግጡ፦\nመጠን፦ ${amount} ብር\nክፍያ፦ 0 ብር\nዘዴ፦ ${method}\nሂሳብ ቁጥር፦ ${details}\nየተቀባይ ስም፦ ${destinationName}`,
     withdrawalPending: (id) => `የማውጫ ጥያቄ #${id} የአስተዳዳሪ ግምገማ እየጠበቀ ነው። ገንዘቡ ተይዟል፤ ክፍያ ገና አልተፈጸመም።`,
@@ -1003,10 +997,10 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
     throw Object.assign(new Error(text.en.minimumWithdrawal(config.withdrawalMinimum)), { status: 400 });
   }
   if (!/^[A-Za-z0-9_-]{24,64}$/.test(String(idempotencyKey || '')) ||
-      !['TELEBIRR', 'CBE'].includes(method) || details.length < 5 || details.length > 191 ||
+      method !== 'TELEBIRR' || details.length < 5 || details.length > 191 ||
       /[\u0000-\u001f\u007f]/.test(details) || destinationName.length < 2 ||
       destinationName.length > 255 || /[\u0000-\u001f\u007f]/.test(destinationName)) {
-    throw Object.assign(new Error('Choose Telebirr or CBE, provide valid payout details, and enter the destination account holder name.'), { status: 400 });
+    throw Object.assign(new Error('Choose Telebirr, provide valid payout details, and enter the destination account holder name.'), { status: 400 });
   }
 
   const connection = await pool.getConnection();
@@ -1917,10 +1911,10 @@ async function handleUserFlow(message, user, lang) {
       chat_id: message.chat.id,
       text: text[lang].withdrawalMethod,
       reply_markup: {
-        inline_keyboard: [[
-          { text: 'Telebirr', callback_data: 'withdraw:method:TELEBIRR' },
-          { text: 'CBE', callback_data: 'withdraw:method:CBE' },
-        ], [{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
+        inline_keyboard: [
+          [{ text: 'Telebirr', callback_data: 'withdraw:method:TELEBIRR' }],
+          [{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }],
+        ],
       },
     });
     return true;
@@ -3738,8 +3732,8 @@ app.post('/telegram/webhook', async (req, res, next) => {
         const lang = languageOf(savedUser?.language);
         const depositReview = /^deposit:(approve|reject):(\d+)$/.exec(data);
         const withdrawalReview = /^withdraw:(approve|reject):(\d+)$/.exec(data);
-        const depositMethod = /^deposit:method:(TELEBIRR|CBE)$/.exec(data);
-        const withdrawalMethod = /^withdraw:method:(TELEBIRR|CBE)$/.exec(data);
+        const depositMethod = /^deposit:method:(TELEBIRR)$/.exec(data);
+        const withdrawalMethod = /^withdraw:method:(TELEBIRR)$/.exec(data);
         const supportTopic = /^help:(deposits|withdrawals|wallet|cartela|rules|technical)$/.exec(data);
 
         if (depositMethod) {
