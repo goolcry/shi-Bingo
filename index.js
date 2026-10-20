@@ -92,6 +92,30 @@ const roomCartelaCacheWarmups = new Map();
 const cartelaSyncAuthCache = new Map();
 const cartelaSyncAuthCacheTtlMs = 30000;
 const maxCartelaSyncAuthCacheEntries = 5000;
+const roomSSEClients = new Map();
+
+function broadcastCartelaEvent(roomId, eventData) {
+  const clients = roomSSEClients.get(String(roomId));
+  if (!clients?.size) return;
+  const payload = `data: ${JSON.stringify(eventData)}\n\n`;
+  for (const response of clients) {
+    if (Array.isArray(response.cartelaEventsPending)) {
+      response.cartelaEventsPending.push(eventData);
+      continue;
+    }
+    if (response.destroyed || response.writableEnded) {
+      clients.delete(response);
+      continue;
+    }
+    try {
+      response.write(payload);
+    } catch (error) {
+      console.warn('[Cartela SSE broadcast failed]:', error.message);
+      clients.delete(response);
+    }
+  }
+  if (clients.size === 0) roomSSEClients.delete(String(roomId));
+}
 
 function getRoomCartelaCache(roomId) {
   const key = String(roomId);
@@ -2985,6 +3009,125 @@ app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
   }
 });
 
+app.get('/api/bootstrap', authenticatedTelegramUser, async (req, res, next) => {
+  try {
+    const identity = await upsertUser(req.telegramUser);
+    const user = await getUser(identity.id);
+    if (!user) throw new Error('Wallet record was not created.');
+    await ensureOpenRoom(String(req.telegramUser.id));
+    const [rooms] = await pool.execute(
+      `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
+         (SELECT COUNT(*) FROM bingo_players p
+          WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players,
+         (SELECT COUNT(*) FROM cartela_reservations cr
+          WHERE cr.room_id = r.id AND cr.status = 'ACTIVE') AS selected_cartelas
+       FROM bingo_rooms r
+       WHERE r.status IN ('WAITING', 'PLAYING', 'VERIFYING')
+       ORDER BY (r.status = 'WAITING') DESC, r.created_at DESC
+       LIMIT 30`,
+    );
+    const [myRooms] = await pool.execute(
+      `SELECT r.id FROM bingo_rooms r JOIN bingo_players p ON p.room_id = r.id
+       WHERE p.telegram_id = ? AND p.left_at IS NULL AND r.status IN ('WAITING', 'PLAYING', 'VERIFYING')
+       ORDER BY p.joined_at DESC LIMIT 1`,
+      [String(req.telegramUser.id)],
+    );
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      user: {
+        id: String(user.telegram_id),
+        firstName: user.first_name,
+        username: user.username,
+        language: user.language,
+      },
+      wallet: {
+        balance: await getAvailableBalance(identity.id),
+        bonusBalance: formatAmount(await getBonusBalance(identity.id)),
+        withdrawableBalance: await getWithdrawableBalance(identity.id),
+        currency: 'BIRR',
+      },
+      myRoom: myRooms[0] ? String(myRooms[0].id) : null,
+      rooms: rooms.map((room) => ({
+        id: String(room.id),
+        roomNumber: room.room_number,
+        stake: formatAmount(room.stake),
+        minPlayers: Number(room.min_players),
+        maxPlayers: Number(room.max_players),
+        currentPlayers: Number(room.current_players),
+        selectedCartelas: Number(room.selected_cartelas),
+        prizePool: formatAmount(room.prize_pool),
+        status: room.status,
+      })),
+      serverTime: Date.now(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/rooms/:id/cartelas-stream', authenticatedCartelaSyncUser, async (req, res, next) => {
+  let heartbeat;
+  try {
+    await initializeSchema();
+    const roomId = String(req.params.id);
+    const [[room]] = await pool.execute('SELECT id FROM bingo_rooms WHERE id = ?', [roomId]);
+    if (!room) return res.status(404).json({ error: 'Room not found.' });
+
+    res.set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+
+    let clients = roomSSEClients.get(roomId);
+    if (!clients) {
+      clients = new Set();
+      roomSSEClients.set(roomId, clients);
+    }
+    clients.add(res);
+    res.cartelaEventsPending = [];
+    res.on('close', () => {
+      clearInterval(heartbeat);
+      const activeClients = roomSSEClients.get(roomId);
+      activeClients?.delete(res);
+      if (activeClients?.size === 0) roomSSEClients.delete(roomId);
+    });
+
+    const [rows] = await pool.execute(
+      `SELECT cartela_number, owner_telegram_id FROM cartela_slots
+       WHERE room_id = ? AND owner_telegram_id IS NOT NULL
+       ORDER BY cartela_number`,
+      [roomId],
+    );
+    if (res.destroyed || res.writableEnded) return;
+    res.write(`data: ${JSON.stringify({
+      type: 'SNAPSHOT',
+      taken: rows.map((row) => ({
+        number: Number(row.cartela_number),
+        userId: String(row.owner_telegram_id),
+      })),
+    })}\n\n`);
+    const pendingEvents = res.cartelaEventsPending;
+    res.cartelaEventsPending = null;
+    for (const event of pendingEvents) {
+      if (res.destroyed || res.writableEnded) break;
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+    heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) res.write(': heartbeat\n\n');
+    }, 20000);
+  } catch (error) {
+    if (res.headersSent) {
+      console.error('[Cartela SSE stream failed]:', error);
+      res.end();
+      return;
+    }
+    next(error);
+  }
+});
+
 app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next) => {
   try {
     await upsertUser(req.telegramUser);
@@ -3171,16 +3314,35 @@ async function selectCartelaHandler(req, res, next) {
 
     await initializeSchema();
     await upsertUser(req.telegramUser);
-    await startDueRoom(req.params.id);
+    const dueRoomTransition = await startDueRoom(req.params.id);
+    if (dueRoomTransition) {
+      throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
+        status: 409,
+        code: 'SELECTION_CLOSED',
+      });
+    }
     cartelaCache = await warmRoomCartelaCache(roomKey);
     if (cartelaCache.has(number) && cartelaCache.get(number) !== telegramId) return sendCartelaTaken(res);
     connection = await pool.getConnection();
     await connection.beginTransaction();
     transactionStarted = true;
-    const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [req.params.id]);
+    const [rooms] = await connection.execute(
+      `SELECT *, UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
+         (selection_deadline IS NULL OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
+       FROM bingo_rooms WHERE id = ? FOR UPDATE`,
+      [req.params.id],
+    );
     const room = rooms[0];
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
-    if (room.status !== 'WAITING') throw Object.assign(new Error('Cartelas can only be selected before the game starts.'), { status: 409 });
+    const requestedDeadline = Number(req.body?.selectionDeadline);
+    const currentDeadline = Number(room.selection_deadline_ms);
+    if (room.status !== 'WAITING' || Number(room.selection_expired)
+      || !Number.isFinite(requestedDeadline) || requestedDeadline !== currentDeadline) {
+      throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
+        status: 409,
+        code: 'SELECTION_CLOSED',
+      });
+    }
     const [players] = await connection.execute(
       'SELECT 1 FROM bingo_players WHERE room_id = ? AND telegram_id = ? AND left_at IS NULL',
       [room.id, String(req.telegramUser.id)],
@@ -3272,6 +3434,11 @@ async function selectCartelaHandler(req, res, next) {
     await connection.commit();
     transactionStarted = false;
     cartelaCache.set(number, telegramId);
+    broadcastCartelaEvent(room.id, {
+      type: 'TAKEN',
+      number,
+      userId: telegramId,
+    });
     res.json({
       selected: true,
       room: (await roomSnapshot(room.id, req.telegramUser.id)).room,
@@ -3295,16 +3462,35 @@ async function deselectCartelaHandler(req, res, next) {
   const connection = await pool.getConnection();
   try {
     await initializeSchema();
-    await startDueRoom(req.params.id);
+    const dueRoomTransition = await startDueRoom(req.params.id);
+    if (dueRoomTransition) {
+      throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
+        status: 409,
+        code: 'SELECTION_CLOSED',
+      });
+    }
     const number = Number(req.params.number);
     if (!Number.isInteger(number) || number < 1 || number > totalCartelas) {
       throw Object.assign(new Error(`Cartela number must be from 1 to ${totalCartelas}.`), { status: 400 });
     }
     await connection.beginTransaction();
-    const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [req.params.id]);
+    const [rooms] = await connection.execute(
+      `SELECT *, UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
+         (selection_deadline IS NULL OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
+       FROM bingo_rooms WHERE id = ? FOR UPDATE`,
+      [req.params.id],
+    );
     const room = rooms[0];
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
-    if (room.status !== 'WAITING') throw Object.assign(new Error('Cartelas cannot be changed after the game starts.'), { status: 409 });
+    const requestedDeadline = Number(req.body?.selectionDeadline);
+    const currentDeadline = Number(room.selection_deadline_ms);
+    if (room.status !== 'WAITING' || Number(room.selection_expired)
+      || !Number.isFinite(requestedDeadline) || requestedDeadline !== currentDeadline) {
+      throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
+        status: 409,
+        code: 'SELECTION_CLOSED',
+      });
+    }
     const [[slot]] = await connection.execute(
       `SELECT owner_telegram_id FROM cartela_slots
        WHERE room_id = ? AND cartela_number = ? FOR UPDATE`,
@@ -3353,6 +3539,11 @@ async function deselectCartelaHandler(req, res, next) {
     );
     await connection.commit();
     activeRoomCartelaCache.get(String(room.id))?.delete(number);
+    broadcastCartelaEvent(room.id, {
+      type: 'RELEASED',
+      number,
+      userId: String(req.telegramUser.id),
+    });
     res.json({
       selected: false,
       room: (await roomSnapshot(room.id, req.telegramUser.id)).room,

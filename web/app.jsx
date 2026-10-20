@@ -328,16 +328,60 @@ function withRoomClock(room, requestStartedAt = Date.now()) {
   };
 }
 
+function readCachedValue(key, fallback) {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || 'null');
+    return value ?? fallback;
+  } catch (error) {
+    console.warn(`[Local cache read failed for ${key}]:`, error);
+    return fallback;
+  }
+}
+
+function cacheAppProfile({ user, wallet, profile } = {}) {
+  try {
+    const cached = readCachedValue('shisho_cached_profile', {});
+    const safeProfile = profile ?? cached.profile;
+    const profileWithoutPhone = safeProfile?.user
+      ? { ...safeProfile, user: { ...safeProfile.user, phoneNumber: undefined } }
+      : safeProfile;
+    window.localStorage.setItem('shisho_cached_profile', JSON.stringify({
+      user: user ?? cached.user,
+      wallet: wallet ?? cached.wallet,
+      profile: profileWithoutPhone,
+    }));
+  } catch (error) {
+    console.warn('[Local profile cache write failed]:', error);
+  }
+}
+
+function cacheAppRooms(rooms) {
+  try {
+    window.localStorage.setItem('shisho_cached_rooms', JSON.stringify(rooms));
+  } catch (error) {
+    console.warn('[Local room cache write failed]:', error);
+  }
+}
+
 function App() {
-  const [lang, setLang] = useState('en');
+  const [lang, setLang] = useState(() => {
+    const cached = readCachedValue('shisho_cached_profile', {});
+    return cached.user?.language === 'am' ? 'am' : 'en';
+  });
   const t = words[lang];
-  const [user, setUser] = useState(null);
-  const [wallet, setWallet] = useState(null);
-  const [walletDetails, setWalletDetails] = useState(null);
+  const [user, setUser] = useState(() => readCachedValue('shisho_cached_profile', {}).user || null);
+  const [wallet, setWallet] = useState(() => readCachedValue('shisho_cached_profile', {}).wallet?.balance ?? null);
+  const [walletDetails, setWalletDetails] = useState(() => readCachedValue('shisho_cached_profile', {}).wallet || null);
   const callAudioRef = useRef(callAudio);
-  const [rooms, setRooms] = useState([]);
+  const [rooms, setRooms] = useState(() => {
+    const cached = readCachedValue('shisho_cached_rooms', []);
+    return Array.isArray(cached) ? cached : [];
+  });
   const [myRoomId, setMyRoomId] = useState(null);
-  const [roomsLoading, setRoomsLoading] = useState(true);
+  const [roomsLoading, setRoomsLoading] = useState(() => {
+    const cached = readCachedValue('shisho_cached_rooms', []);
+    return !Array.isArray(cached) || cached.length === 0;
+  });
   const [view, setView] = useState('play');
   const [room, setRoom] = useState(null);
   const [roomReady, setRoomReady] = useState(false);
@@ -349,10 +393,11 @@ function App() {
   const selectionMutationQueue = useRef(Promise.resolve());
   const pendingCartelaToggles = useRef(new Set());
   const activeSelectionMutations = useRef(0);
+  const cartelaStreamConnected = useRef(false);
   const [game, setGame] = useState(null);
   const [pendingBingoClaim, setPendingBingoClaim] = useState(null);
   const lastGameCall = useRef({ roomId: null, number: null, callIndex: 0 });
-  const [profile, setProfile] = useState(null);
+  const [profile, setProfile] = useState(() => readCachedValue('shisho_cached_profile', {}).profile || null);
   const [history, setHistory] = useState([]);
   const [ranks, setRanks] = useState([]);
   const [referral, setReferral] = useState(null);
@@ -371,6 +416,7 @@ function App() {
       setWallet(data.wallet.balance);
       setWalletDetails(data.wallet);
       setLang(data.user.language === 'am' ? 'am' : 'en');
+      cacheAppProfile({ user: data.user, wallet: data.wallet });
     } catch (reason) {
       console.warn('[Balance refresh skipped]:', reason);
       throw reason;
@@ -383,6 +429,7 @@ function App() {
       const data = await api('/api/rooms', { initData, allowAnonymous: true });
       setRooms(data.rooms);
       setMyRoomId(data.myRoom ? String(data.myRoom) : null);
+      cacheAppRooms(data.rooms);
       return data;
     } finally {
       setRoomsLoading(false);
@@ -578,24 +625,45 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    refreshRooms()
-      .then((roomData) => {
+    const refreshBootstrap = async () => {
+      try {
+        const data = await request('/api/bootstrap');
         if (!active) return;
-        if (initData) {
-          setError('');
-          const myRoom = roomData.rooms.find((item) => String(item.id) === String(roomData.myRoom));
-          if (myRoom?.status === 'PLAYING') {
-            loadRoom(roomData.myRoom, roomSessionRevision.current, undefined, { onlyReconnect: true })
-              .catch((reason) => { if (active) setError(reason.message); });
-          }
-        } else if (telegramChecked) {
-          setError(telegramDiagnostic);
+        setUser(data.user);
+        setWallet(data.wallet.balance);
+        setWalletDetails(data.wallet);
+        setLang(data.user.language === 'am' ? 'am' : 'en');
+        setRooms(data.rooms);
+        setMyRoomId(data.myRoom ? String(data.myRoom) : null);
+        setRoomsLoading(false);
+        setError('');
+        cacheAppProfile({ user: data.user, wallet: data.wallet });
+        cacheAppRooms(data.rooms);
+        const myRoom = data.rooms.find((item) => String(item.id) === String(data.myRoom));
+        if (myRoom?.status === 'PLAYING') {
+          loadRoom(data.myRoom, roomSessionRevision.current, undefined, { onlyReconnect: true })
+            .catch((reason) => { if (active) setError(reason.message); });
         }
-      })
-      .catch((reason) => { if (active) setError(reason.message); });
-    if (initData) refreshWallet().catch((reason) => { if (active) setError(reason.message); });
+      } catch (reason) {
+        console.warn('[Bootstrap refresh failed; using individual endpoints]:', reason);
+        try {
+          await Promise.all([refreshRooms(), refreshWallet()]);
+        } catch (fallbackError) {
+          if (active) setError(fallbackError.message);
+        }
+      }
+    };
+    if (initData) {
+      void refreshBootstrap();
+    } else {
+      refreshRooms()
+        .then(() => {
+          if (active && telegramChecked) setError(telegramDiagnostic);
+        })
+        .catch((reason) => { if (active) setError(reason.message); });
+    }
     return () => { active = false; };
-  }, [initData, telegramChecked, telegramDiagnostic, refreshWallet, refreshRooms, loadRoom]);
+  }, [initData, telegramChecked, telegramDiagnostic, request, refreshWallet, refreshRooms, loadRoom]);
 
   useEffect(() => {
     if (view !== 'play') return undefined;
@@ -608,9 +676,106 @@ function App() {
   useEffect(() => {
     if (view !== 'cartelas' || !room?.id || !roomReady || !initData) return undefined;
     let active = true;
+    let controller;
+    let reconnectTimer;
+    const roomId = String(room.id);
+    const applyEvent = (data) => {
+      if (String(roomId) !== String(room.id)) return;
+      if (data.type === 'SNAPSHOT' && Array.isArray(data.taken)) {
+        const owners = new Map(data.taken.map((item) => [Number(item.number), String(item.userId)]));
+        setRoom((current) => {
+          if (!current || String(current.id) !== roomId) return current;
+          const cartelas = current.cartelas.map((card) => {
+            if (pendingCartelaToggles.current.has(`${roomId}:${Number(card.number)}`)) return card;
+            const owner = owners.get(Number(card.number));
+            const state = owner
+              ? owner === String(user?.id) ? 'MINE' : 'TAKEN'
+              : 'AVAILABLE';
+            return card.state === state ? card : { ...card, state };
+          });
+          return { ...current, cartelas };
+        });
+        return;
+      }
+
+      const number = Number(data.number);
+      if (!Number.isInteger(number) || number < 1 || number > 200) return;
+      setRoom((current) => {
+        if (!current || String(current.id) !== roomId) return current;
+        const cartelas = current.cartelas.map((card) => {
+          if (Number(card.number) !== number) return card;
+          const nextState = data.type === 'TAKEN'
+            ? String(data.userId) === String(user?.id) ? 'MINE' : 'TAKEN'
+            : data.type === 'RELEASED'
+              ? card.state === 'TAKEN' || String(data.userId) === String(user?.id) ? 'AVAILABLE' : card.state
+              : card.state;
+          return card.state === nextState ? card : { ...card, state: nextState };
+        });
+        return { ...current, cartelas };
+      });
+    };
+    const connect = async () => {
+      controller = new AbortController();
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/cartelas-stream`, {
+          headers: { Authorization: `tma ${initData}` },
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Cartela stream failed (${response.status}).`);
+        if (!response.body) throw new Error('Streaming responses are unavailable in this browser.');
+        cartelaStreamConnected.current = true;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (active) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const messages = buffer.split(/\r?\n\r?\n/);
+          buffer = messages.pop() || '';
+          for (const message of messages) {
+            const payload = message.split(/\r?\n/)
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trim())
+              .join('\n');
+            if (!payload) continue;
+            try {
+              applyEvent(JSON.parse(payload));
+            } catch (error) {
+              console.warn('[Cartela SSE message invalid]:', error);
+            }
+          }
+        }
+        await reader.cancel().catch(() => {});
+      } catch (error) {
+        if (active && error.name !== 'AbortError') {
+          console.warn('[Cartela SSE disconnected; using sync fallback]:', error);
+        }
+      } finally {
+        cartelaStreamConnected.current = false;
+        if (active) reconnectTimer = window.setTimeout(connect, 1000);
+      }
+    };
+    void connect();
+    return () => {
+      active = false;
+      cartelaStreamConnected.current = false;
+      controller?.abort();
+      window.clearTimeout(reconnectTimer);
+    };
+  }, [view, room?.id, roomReady, initData, user?.id]);
+
+  useEffect(() => {
+    if (view !== 'cartelas' || !room?.id || !roomReady || !initData) return undefined;
+    let active = true;
     let inFlight = false;
+    let timer = null;
     const syncCartelas = async () => {
-      if (inFlight || document.visibilityState !== 'visible') return;
+      if (!active || inFlight || document.visibilityState !== 'visible') {
+        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 5000 : 250);
+        return;
+      }
       inFlight = true;
       try {
         const requestStartedAt = Date.now();
@@ -655,13 +820,13 @@ function App() {
         if (active) console.warn('[Cartela sync tick skipped]:', reason);
       } finally {
         inFlight = false;
+        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 5000 : 250);
       }
     };
     syncCartelas();
-    const timer = window.setInterval(syncCartelas, 250);
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [view, room?.id, roomReady, initData, request]);
 
@@ -761,6 +926,7 @@ function App() {
           ]);
           if (active) {
             setProfile(result);
+            cacheAppProfile({ profile: result });
             setWallet(result.wallet.availableBalance);
             setWalletDetails(result.wallet);
             setReferral(invite);
@@ -909,7 +1075,11 @@ function App() {
       const requestStartedAt = Date.now();
       const data = await request(`/api/rooms/${encodeURIComponent(roomId)}/cartela`, {
         method: 'POST',
-        body: { cartelaNumber: card.number, action },
+        body: {
+          cartelaNumber: card.number,
+          action,
+          selectionDeadline: Number(room.countdown?.deadline),
+        },
       });
       if (sessionRevision === roomSessionRevision.current) {
         roomStateRevision.current += 1;
@@ -1050,6 +1220,10 @@ function App() {
           const updated = await request('/api/profile');
           setProfile(updated);
           setWalletDetails(updated.wallet);
+          cacheAppProfile({ profile: updated, wallet: {
+            ...updated.wallet,
+            balance: updated.wallet.availableBalance,
+          } });
         } catch (reason) {
           setError(reason.message);
         }
@@ -1131,6 +1305,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const [potBase, setPotBase] = useState(room.pot ?? room.prizePool);
   const [notice, setNotice] = useState('');
   const mutationId = useRef(0);
+  const lockoutRefreshTriggered = useRef(false);
   const noticeTimer = useRef(null);
   const waiting = room.status === 'WAITING';
   const countdown = room.countdown || {};
@@ -1195,8 +1370,18 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
     noticeTimer.current = window.setTimeout(() => setNotice(''), 2600);
   }
 
+  useEffect(() => {
+    if (!waiting || secondsLeft > 0) {
+      lockoutRefreshTriggered.current = false;
+      return;
+    }
+    if (lockoutRefreshTriggered.current) return;
+    lockoutRefreshTriggered.current = true;
+    onRefresh().catch((error) => console.warn('[Selection lockout refresh failed]:', error));
+  }, [waiting, secondsLeft]);
+
   async function chooseCartela(card) {
-    if (!waiting) return;
+    if (!waiting || secondsLeft <= 0) return;
     if (card.state === 'TAKEN' || overrides[card.number]?.pendingId) return;
     const action = card.state === 'MINE' ? 'deselect' : 'select';
     const selectedCount = cards.filter((item) => item.state === 'MINE').length;
