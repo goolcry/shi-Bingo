@@ -317,13 +317,13 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
   return data;
 }
 
-function withRoomClock(room, requestStartedAt = Date.now()) {
+function withRoomClock(room, requestStartedAt = Date.now(), responseReceivedAt = Date.now()) {
   if (!room?.countdown) return room;
   return {
     ...room,
     countdown: {
       ...room.countdown,
-      clientOffset: Number(room.countdown.serverNow) - requestStartedAt,
+      clientOffset: Number(room.countdown.serverNow) - (requestStartedAt + responseReceivedAt) / 2,
     },
   };
 }
@@ -682,6 +682,27 @@ function App() {
     const roomId = String(room.id);
     const applyEvent = (data) => {
       if (String(roomId) !== String(room.id)) return;
+      if (data.type === 'GAME_STARTED') {
+        loadRoom(roomId).catch((error) => console.warn('[Game start state refresh failed]:', error));
+        return;
+      }
+      if (data.type === 'TIMER_EXTENDED') {
+        const serverTime = Number(data.serverTime);
+        const serverOffset = Number.isFinite(serverTime) ? serverTime - Date.now() : 0;
+        setRoom((current) => current && String(current.id) === roomId
+          ? {
+            ...current,
+            status: 'WAITING',
+            countdown: {
+              ...current.countdown,
+              deadline: Number(data.selectionEndsAtMs),
+              serverNow: serverTime,
+              clientOffset: serverOffset,
+            },
+          }
+          : current);
+        return;
+      }
       if (data.type === 'SNAPSHOT' && Array.isArray(data.taken)) {
         const owners = new Map(data.taken.map((item) => [Number(item.number), String(item.userId)]));
         setRoom((current) => {
@@ -765,7 +786,7 @@ function App() {
       controller?.abort();
       window.clearTimeout(reconnectTimer);
     };
-  }, [view, room?.id, roomReady, initData, user?.id]);
+  }, [view, room?.id, roomReady, initData, user?.id, loadRoom]);
 
   useEffect(() => {
     if (view !== 'cartelas' || !room?.id || !roomReady || !initData) return undefined;
@@ -774,13 +795,14 @@ function App() {
     let timer = null;
     const syncCartelas = async () => {
       if (!active || inFlight || document.visibilityState !== 'visible') {
-        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 5000 : 250);
+        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 1000 : 250);
         return;
       }
       inFlight = true;
       try {
         const requestStartedAt = Date.now();
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`, { cache: 'no-store' });
+        const responseReceivedAt = Date.now();
         if (!active || !Array.isArray(data.taken)) return;
         const serverTime = Number(data.serverTime);
         if (Number.isFinite(serverTime) && serverTime < latestRoomServerTime.current) return;
@@ -805,7 +827,7 @@ function App() {
               ...current.countdown,
               deadline: Number(data.selectionEndsAt),
               serverNow: serverTime,
-              clientOffset: serverTime - requestStartedAt,
+              clientOffset: serverTime - (requestStartedAt + responseReceivedAt) / 2,
             };
           return {
             ...current,
@@ -821,7 +843,7 @@ function App() {
         if (active) console.warn('[Cartela sync tick skipped]:', reason);
       } finally {
         inFlight = false;
-        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 5000 : 250);
+        if (active) timer = window.setTimeout(syncCartelas, cartelaStreamConnected.current ? 1000 : 250);
       }
     };
     syncCartelas();
@@ -1319,6 +1341,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const secondsLeft = Number.isFinite(countdownDeadline)
     ? Math.max(0, Math.ceil((countdownDeadline - serverNow) / 1000))
     : 30;
+  const selectionOpen = waiting && (Number.isFinite(countdownDeadline)
+    ? serverNow < countdownDeadline + 1500
+    : loading);
   const roomCards = loading
     ? Array.from({ length: TOTAL_CARTELAS }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
     : room.cartelas || [];
@@ -1376,17 +1401,17 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   }
 
   useEffect(() => {
-    if (!waiting || secondsLeft > 0) {
+    if (!waiting || !Number.isFinite(countdownDeadline) || serverNow < countdownDeadline + 1500) {
       lockoutRefreshTriggered.current = false;
       return;
     }
     if (lockoutRefreshTriggered.current) return;
     lockoutRefreshTriggered.current = true;
     Promise.resolve(onRefresh()).catch((error) => console.warn('[Selection lockout refresh failed]:', error));
-  }, [waiting, secondsLeft]);
+  }, [waiting, countdownDeadline, serverNow]);
 
   async function chooseCartela(card) {
-    if (!waiting || secondsLeft <= 0) return;
+    if (!selectionOpen) return;
     if (card.state === 'TAKEN' || overrides[card.number]?.pendingId) return;
     const action = card.state === 'MINE' ? 'deselect' : 'select';
     const selectedCount = cards.filter((item) => item.state === 'MINE').length;
@@ -1437,9 +1462,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
         return next;
       });
       console.warn('[Cartela toggle failed, optimistic selection rolled back]:', error);
-      if (action === 'select' && error.code === 'CARTELA_TAKEN') {
-        telegramWebApp()?.showAlert?.(t.cartelaTakenAlert);
-      }
+      const message = error.message || t.cartelaTakenAlert;
+      if (telegramWebApp()?.showAlert) telegramWebApp().showAlert(message);
+      else showNotice(message);
     }
   }
 
@@ -1462,7 +1487,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
         {cards.map((card) => <button
           key={`${room.id}-${card.number}`}
           className={`cartela-btn ${card.state === 'MINE' ? 'mine' : card.state === 'TAKEN' ? 'taken' : 'available'}`}
-          disabled={card.state === 'TAKEN' || !waiting || secondsLeft <= 0 || Boolean(overrides[card.number]?.pendingId)}
+          disabled={card.state === 'TAKEN' || !selectionOpen || Boolean(overrides[card.number]?.pendingId)}
           aria-label={`${t.cartela} ${card.number}: ${card.state === 'MINE' ? t.selected : card.state === 'TAKEN' ? t.taken : t.available}`}
           onClick={() => chooseCartela(card)}
         >{card.number}</button>)}

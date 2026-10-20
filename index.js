@@ -80,7 +80,7 @@ const pool = mysql.createPool({
 });
 const cartelaPrice = '10.00';
 const totalCartelas = 200;
-const roomMinPlayers = 3;
+const roomMinPlayers = 2;
 const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
 const roomCountdownSeconds = 30;
@@ -2711,7 +2711,7 @@ async function startDueRoom(roomId) {
     await connection.beginTransaction();
     const [[room]] = await connection.execute(
       `SELECT status, min_players, selection_deadline,
-         selection_deadline <= CURRENT_TIMESTAMP AS is_due
+         DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3) AS is_due
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [roomId],
     );
@@ -2730,17 +2730,29 @@ async function startDueRoom(roomId) {
       );
       await connection.commit();
       releaseRoomCartelaCache(roomId);
+      broadcastCartelaEvent(roomId, { type: 'GAME_STARTED', roomId: String(roomId) });
       return 'started';
     }
 
     await connection.execute(
       `UPDATE bingo_rooms
        SET selection_started_at = CURRENT_TIMESTAMP,
-           selection_deadline = DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ${roomCountdownSeconds} SECOND)
+           selection_deadline = DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 20 SECOND)
        WHERE id = ? AND status = 'WAITING'`,
       [roomId],
     );
     await connection.commit();
+    const [[updatedRoom]] = await pool.execute(
+      `SELECT UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
+         UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms
+       FROM bingo_rooms WHERE id = ?`,
+      [roomId],
+    );
+    broadcastCartelaEvent(roomId, {
+      type: 'TIMER_EXTENDED',
+      selectionEndsAtMs: Number(updatedRoom.selection_deadline_ms),
+      serverTime: Number(updatedRoom.server_now_ms),
+    });
     return 'reopened';
   } catch (error) {
     await connection.rollback().catch(() => {});
@@ -2754,7 +2766,8 @@ async function startDueRooms() {
   await initializeSchema();
   const [rooms] = await pool.execute(
     `SELECT id FROM bingo_rooms
-     WHERE status = 'WAITING' AND selection_deadline <= CURRENT_TIMESTAMP
+     WHERE status = 'WAITING'
+       AND DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)
      ORDER BY selection_deadline ASC LIMIT 100`,
   );
   const [verifyingRooms] = await pool.execute(
@@ -3253,6 +3266,17 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
     await initializeSchema();
     const telegramId = String(req.telegramUser.id);
     const roomId = String(req.params.id);
+    const [[dueStatus]] = await pool.execute(
+      `SELECT status,
+         DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3) AS is_due
+       FROM bingo_rooms WHERE id = ?`,
+      [roomId],
+    );
+    if (!dueStatus) return res.status(404).json({ error: 'ROOM_NOT_FOUND' });
+    const transition = dueStatus.status === 'WAITING' && Number(dueStatus.is_due)
+      ? await startDueRoom(roomId)
+      : null;
+    if (transition === 'started') await advanceRoomGame(roomId);
     const [[room]] = await pool.execute(
       `SELECT status, prize_pool,
               UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
@@ -3327,17 +3351,14 @@ async function selectCartelaHandler(req, res, next) {
     await connection.beginTransaction();
     transactionStarted = true;
     const [rooms] = await connection.execute(
-      `SELECT *, UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
-         (selection_deadline IS NULL OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
+      `SELECT *, (selection_deadline IS NULL
+         OR DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)) AS selection_expired
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [req.params.id],
     );
     const room = rooms[0];
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
-    const requestedDeadline = Number(req.body?.selectionDeadline);
-    const currentDeadline = Number(room.selection_deadline_ms);
-    if (room.status !== 'WAITING' || Number(room.selection_expired)
-      || !Number.isFinite(requestedDeadline) || requestedDeadline !== currentDeadline) {
+    if (room.status !== 'WAITING' || Number(room.selection_expired)) {
       throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
         status: 409,
         code: 'SELECTION_CLOSED',
@@ -3475,17 +3496,14 @@ async function deselectCartelaHandler(req, res, next) {
     }
     await connection.beginTransaction();
     const [rooms] = await connection.execute(
-      `SELECT *, UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_deadline_ms,
-         (selection_deadline IS NULL OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
+      `SELECT *, (selection_deadline IS NULL
+         OR DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)) AS selection_expired
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [req.params.id],
     );
     const room = rooms[0];
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
-    const requestedDeadline = Number(req.body?.selectionDeadline);
-    const currentDeadline = Number(room.selection_deadline_ms);
-    if (room.status !== 'WAITING' || Number(room.selection_expired)
-      || !Number.isFinite(requestedDeadline) || requestedDeadline !== currentDeadline) {
+    if (room.status !== 'WAITING' || Number(room.selection_expired)) {
       throw Object.assign(new Error('Selection phase has ended. / የካርቴላ ምርጫ ጊዜ አልቋል።'), {
         status: 409,
         code: 'SELECTION_CLOSED',
@@ -4815,6 +4833,21 @@ const reactMiniAppHtml = `<!doctype html>
 if (require.main === module) {
   const port = Number(process.env.PORT || 3000);
   initializeSchema().then(() => {
+    let lifecycleTickRunning = false;
+    const runLifecycleTick = async () => {
+      if (lifecycleTickRunning) return;
+      lifecycleTickRunning = true;
+      try {
+        await startDueRooms();
+      } catch (error) {
+        console.error('[Room lifecycle ticker failed]:', error);
+      } finally {
+        lifecycleTickRunning = false;
+      }
+    };
+    const lifecycleTicker = setInterval(runLifecycleTick, 1000);
+    lifecycleTicker.unref();
+    void runLifecycleTick();
     app.listen(port, () => console.log(`SHISHO BINGO listening on port ${port}`));
   }).catch((error) => {
     console.error('Could not initialize the database:', error.message);
