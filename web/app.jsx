@@ -391,6 +391,7 @@ function App() {
   const finishedRoomId = useRef(null);
   const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
+  const roomJoinRequest = useRef(null);
   const pendingCartelaToggles = useRef(new Set());
   const activeSelectionMutations = useRef(0);
   const cartelaStreamConnected = useRef(false);
@@ -1018,10 +1019,12 @@ function App() {
     setError('');
     try {
       const requestStartedAt = Date.now();
-      const [data, me] = await Promise.all([
+      const joinRequest = Promise.all([
         request(`/api/rooms/${encodeURIComponent(item.id)}/join`, { method: 'POST', body: {} }),
         request('/api/me'),
       ]);
+      roomJoinRequest.current = joinRequest;
+      const [data, me] = await joinRequest;
       const responseReceivedAt = Date.now();
       if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
@@ -1055,6 +1058,7 @@ function App() {
       if (!keepCurrentView) setView('play');
       return false;
     } finally {
+      roomJoinRequest.current = null;
       if (sessionRevision === roomSessionRevision.current) setBusy(false);
     }
   }
@@ -1071,6 +1075,8 @@ function App() {
     setBusy(true);
     const operation = selectionMutationQueue.current.then(async () => {
       if (sessionRevision !== roomSessionRevision.current) throw new Error('Room changed before the selection was saved.');
+      if (roomJoinRequest.current) await roomJoinRequest.current;
+      if (sessionRevision !== roomSessionRevision.current) throw new Error('Room changed before the selection was saved.');
       roomStateRevision.current += 1;
       const requestStartedAt = Date.now();
       const data = await request(`/api/rooms/${encodeURIComponent(roomId)}/cartela`, {
@@ -1078,7 +1084,6 @@ function App() {
         body: {
           cartelaNumber: card.number,
           action,
-          selectionDeadline: Number(room.countdown?.deadline),
         },
       });
       if (sessionRevision === roomSessionRevision.current) {
@@ -1201,7 +1206,7 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
+      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
       {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
       {view === 'winner' && <WinnerScreen
@@ -1297,7 +1302,7 @@ function PlayScreen({ t, rooms, myRoomId, roomsLoading, onJoin, busy, onRefresh 
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave }) {
+function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave, onRefresh = async () => {} }) {
   const [clockNow, setClockNow] = useState(Date.now());
   const [overrides, setOverrides] = useState({});
   const [pending, setPending] = useState({});
@@ -1314,13 +1319,13 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const secondsLeft = Number.isFinite(countdownDeadline)
     ? Math.max(0, Math.ceil((countdownDeadline - serverNow) / 1000))
     : 30;
-  const cards = (room.cartelas || []).map((card) => ({
+  const roomCards = loading
+    ? Array.from({ length: TOTAL_CARTELAS }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
+    : room.cartelas || [];
+  const cards = roomCards.map((card) => ({
     ...card,
     state: overrides[card.number]?.state || card.state,
   }));
-  const displayedCards = loading
-    ? Array.from({ length: TOTAL_CARTELAS }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
-    : cards;
   const mine = cards.filter((card) => card.state === 'MINE');
   const availableCartelas = cards.filter((card) => card.state === 'AVAILABLE').length;
   const pendingValues = Object.values(pending);
@@ -1377,7 +1382,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
     }
     if (lockoutRefreshTriggered.current) return;
     lockoutRefreshTriggered.current = true;
-    onRefresh().catch((error) => console.warn('[Selection lockout refresh failed]:', error));
+    Promise.resolve(onRefresh()).catch((error) => console.warn('[Selection lockout refresh failed]:', error));
   }, [waiting, secondsLeft]);
 
   async function chooseCartela(card) {
@@ -1389,7 +1394,8 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
       showNotice(t.maximumCartelas);
       return;
     }
-    if (action === 'select' && (displayBalance === null || multiplyMoney(displayBalance, 1) < stakeMinorUnits)) {
+    if (action === 'select' && displayBalance !== null
+      && multiplyMoney(displayBalance, 1) < stakeMinorUnits) {
       showNotice(t.insufficientBalance);
       return;
     }
@@ -1450,22 +1456,13 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
       <div className="cartela-hud-card starts-in"><small>{t.startingIn}</small><b>{timerLabel}</b></div>
     </section>
     {!waiting && <p className="cartela-closed-note" role="status">{t.cartelaClosed}</p>}
-    {loading
-      ? <div className="cartela-grid-8col" aria-label={t.cartelaSelection} aria-busy="true">
-        {displayedCards.map((card) => <button
-          key={`${room.id}-${card.number}`}
-          className="cartela-btn loading"
-          disabled
-          aria-label={`${t.cartela} ${card.number}: ${t.loading}`}
-        >{card.number}</button>)}
-      </div>
-      : cards.length !== TOTAL_CARTELAS
+    {cards.length !== TOTAL_CARTELAS
       ? <div className="cartela-load-error" role="alert">{t.cartelaLoadFailed.replace('{count}', cards.length)}</div>
       : <div className="cartela-grid-8col" aria-label={t.cartelaSelection}>
         {cards.map((card) => <button
           key={`${room.id}-${card.number}`}
           className={`cartela-btn ${card.state === 'MINE' ? 'mine' : card.state === 'TAKEN' ? 'taken' : 'available'}`}
-          disabled={card.state === 'TAKEN' || !waiting || Boolean(overrides[card.number]?.pendingId)}
+          disabled={card.state === 'TAKEN' || !waiting || secondsLeft <= 0 || Boolean(overrides[card.number]?.pendingId)}
           aria-label={`${t.cartela} ${card.number}: ${card.state === 'MINE' ? t.selected : card.state === 'TAKEN' ? t.taken : t.available}`}
           onClick={() => chooseCartela(card)}
         >{card.number}</button>)}
@@ -1474,7 +1471,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
       {mine.length
         ? mine.map((card) => <article className="cartela-preview-card" key={card.number}>
           <h2>{t.cartelaNumberTitle.replace('{number}', card.number)}</h2>
-          <div className="cartela-preview-board">
+          {Array.isArray(card.numbers) ? <div className="cartela-preview-board">
             {['B', 'I', 'N', 'G', 'O'].map((letter, column) => <div className="cartela-preview-column" key={letter}>
               <b>{letter}</b>
               {[0, 1, 2, 3, 4].map((row) => {
@@ -1482,7 +1479,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
                 return <span className={value === 'FREE' ? 'free' : ''} key={`${row}-${column}`}>{value === 'FREE' ? t.free : value ?? '—'}</span>;
               })}
             </div>)}
-          </div>
+          </div> : <p className="cartela-preview-placeholder">{t.loading}</p>}
         </article>)
         : <p className="cartela-preview-placeholder">{t.selectPreview}</p>}
     </section>
