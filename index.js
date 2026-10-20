@@ -3632,7 +3632,7 @@ app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
   }
 });
 
-app.get('/api/games/recent-winners', authenticatedTelegramUser, async (_req, res, next) => {
+app.get(['/api/games/recent-winners', '/api/games/recent-activity'], authenticatedTelegramUser, async (_req, res, next) => {
   try {
     await initializeSchema();
     const [rows] = await pool.execute(
@@ -3643,14 +3643,13 @@ app.get('/api/games/recent-winners', authenticatedTelegramUser, async (_req, res
        LIMIT 5`,
     );
     res.set('Cache-Control', 'no-store');
-    res.json({
-      winners: rows.map((row) => ({
-        name: row.first_name || row.username || 'Player',
-        cartelaNumber: Number(row.cartela_number),
-        gameId: String(row.room_id),
-        prize: String(Math.round(Number(row.prize))),
-      })),
-    });
+    const activity = rows.map((row) => ({
+      name: row.first_name || row.username || 'Player',
+      cartelaNumber: Number(row.cartela_number),
+      gameId: String(row.room_id),
+      prize: String(Math.round(Number(row.prize))),
+    }));
+    res.json({ activity, winners: activity });
   } catch (error) {
     next(error);
   }

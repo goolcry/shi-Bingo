@@ -846,7 +846,8 @@ function App() {
       cartelas: [],
     }));
     setRoomReady(Boolean(cachedRoom));
-    if (!keepCurrentView) setView('cartelas');
+    const roomIsActive = ['PLAYING', 'VERIFYING', 'FINISHED'].includes(item.status);
+    if (!keepCurrentView && !roomIsActive) setView('cartelas');
     setBusy(true);
     setError('');
     try {
@@ -1359,9 +1360,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
     return calledNumbers;
   }, [callsAreFrozen, calledNumbers]);
   const displayedCalledSet = useMemo(() => new Set(displayedNumbers.map(Number)), [displayedNumbers]);
-  const recent = displayedNumbers.slice(-2).reverse();
+  const recent = displayedNumbers.slice(-4, -1).reverse();
   const currentNumber = displayedNumbers.at(-1) ?? null;
-  const previousNumber = recent[1] ?? null;
   const markedNumbersFor = (card) => autoMark
     ? displayedCalledSet
     : new Set(manualMarks[card.number] || []);
@@ -1388,8 +1388,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
       if (inFlight) return;
       inFlight = true;
       try {
-        const data = await request('/api/games/recent-winners');
-        if (active && Array.isArray(data.winners)) setRecentWinners(data.winners);
+        const data = await request('/api/games/recent-activity');
+        if (active && Array.isArray(data.activity)) setRecentWinners(data.activity);
       } catch (error) {
         if (active) console.warn('[Recent winners refresh failed]:', error.message);
       } finally {
@@ -1546,7 +1546,11 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
             <strong key={currentNumber ?? 'waiting'}>{currentNumber === null ? '—' : bingoLabel(currentNumber)}</strong>
           </div>
           <div className="live-recent-calls"><small>{t.recent}</small>
-            <span className="recent-ball">{previousNumber === null ? '—' : bingoLabel(previousNumber)}</span>
+            <div className="recent-ball-list">
+              {recent.length === 0
+                ? <span className="recent-ball">—</span>
+                : recent.map((number) => <span className="recent-ball" key={number}>{bingoLabel(number)}</span>)}
+            </div>
           </div>
         </div>
         {!isSpectator && <div className="live-controls">
@@ -2244,6 +2248,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .live-call-strip{display:grid;grid-template-columns:1fr 1fr;min-height:64px;gap:3px;padding:5px;border-radius:12px;background:#160c25}
 .live-current-call{border:0;padding:0}.live-current-call strong{display:grid;place-items:center;width:44px;height:44px;border:2px solid #ffd35b;border-radius:50%;background:radial-gradient(circle at 35% 25%,#29dca0,#087b61 70%);color:#fff;font-size:15px;box-shadow:0 0 12px #f8d36f99,0 0 17px #00c99255}
 .live-recent-calls{display:grid;justify-items:center;align-content:center;gap:3px}.live-recent-calls>small{font-size:7px}.live-recent-calls .recent-ball{display:grid;place-items:center;width:34px;height:34px;border-radius:50%;background:#793bd0;color:#fff;font-size:9px;font-weight:900;box-shadow:0 0 10px #9d61ff70}
+.live-right-column.spectator .live-recent-calls .recent-ball{width:23px;height:23px;font-size:7px}
 .live-controls{display:grid;grid-template-columns:1fr 1fr;gap:5px}
 .auto-toggle,.sound-toggle{display:flex;align-items:center;justify-content:center;gap:8px;min-height:31px;border:1px solid #302044;border-radius:18px;background:#160d24;color:#e6d9f4;font-size:10px;font-weight:800}
 .auto-toggle i{position:relative;width:34px;height:18px;border-radius:20px;background:#46364f;transition:background .15s}.auto-toggle i b{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#c5b8d0;transition:transform .15s}.auto-toggle.enabled i{background:#c7a12d}.auto-toggle.enabled i b{transform:translateX(16px);background:#fff}
