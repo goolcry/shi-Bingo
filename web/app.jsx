@@ -188,7 +188,9 @@ const words = {
     nextRound: 'Next round in {seconds}s...', playerProfile: 'PLAYER PROFILE',
     gamesWon: 'Games won', gamesPlayed: 'Games played', winnings: 'Winnings', winRate: 'Win rate', referrals: 'Referrals',
     successfulReferrals: 'Successful referrals:',
-    availableBalance: 'Available balance', paymentMethod: 'Payment method', amountBirr: 'Amount (BIRR)',
+    availableBalance: 'Available play balance', bonusBalance: 'Referral bonus · play only',
+    withdrawableBalance: 'Withdrawable balance', bonusExplainer: 'Referral bonus can be used to play, but cannot be withdrawn directly.',
+    paymentMethod: 'Payment method', amountBirr: 'Amount (BIRR)',
     transactionReference: 'Transaction reference', submitApproval: 'Submit for approval',
     paymentUnconfigured: 'Payment methods are not configured.',
     minWithdrawal: 'Minimum withdrawal: 50.00 BIRR. Requests reserve funds while an administrator reviews the payout.',
@@ -249,7 +251,9 @@ const words = {
     nextRound: 'ቀጣዩ ዙር በ{seconds} ሰከንድ...', playerProfile: 'የተጫዋች መገለጫ',
     gamesWon: 'ያሸነፉ ጨዋታዎች', gamesPlayed: 'የተጫወቱ ጨዋታዎች', winnings: 'ያሸነፉት', winRate: 'የማሸነፍ መጠን', referrals: 'ግብዣዎች',
     inviteCopied: 'የግብዣ አገናኙ ተቀድቷል።', successfulReferrals: 'የተሳኩ ግብዣዎች:',
-    availableBalance: 'ያለው ቀሪ ሂሳብ', paymentMethod: 'የክፍያ ዘዴ', amountBirr: 'መጠን (ብር)',
+    availableBalance: 'ለመጫወት ያለው ቀሪ ሂሳብ', bonusBalance: 'የግብዣ ጉርሻ · ለጨዋታ ብቻ',
+    withdrawableBalance: 'ማውጣት የሚቻለው ቀሪ ሂሳብ', bonusExplainer: 'የግብዣ ጉርሻውን ለመጫወት መጠቀም ይቻላል፤ በቀጥታ ማውጣት ግን አይቻልም።',
+    paymentMethod: 'የክፍያ ዘዴ', amountBirr: 'መጠን (ብር)',
     transactionReference: 'የግብይት ማጣቀሻ', submitApproval: 'ለማጽደቅ አስገባ',
     paymentUnconfigured: 'የክፍያ ዘዴዎች አልተዋቀሩም።',
     minWithdrawal: 'ዝቅተኛ የማውጣት መጠን፦ 50.00 ብር። አስተዳዳሪው እስኪገመግም ገንዘቡ ይያዛል።',
@@ -317,6 +321,7 @@ function App() {
   const t = words[lang];
   const [user, setUser] = useState(null);
   const [wallet, setWallet] = useState(null);
+  const [walletDetails, setWalletDetails] = useState(null);
   const callAudioRef = useRef(callAudio);
   const [rooms, setRooms] = useState([]);
   const [myRoomId, setMyRoomId] = useState(null);
@@ -352,6 +357,7 @@ function App() {
       const data = await request('/api/me');
       setUser(data.user);
       setWallet(data.wallet.balance);
+      setWalletDetails(data.wallet);
       setLang(data.user.language === 'am' ? 'am' : 'en');
     } catch (reason) {
       console.warn('[Balance refresh skipped]:', reason);
@@ -743,6 +749,8 @@ function App() {
           ]);
           if (active) {
             setProfile(result);
+            setWallet(result.wallet.availableBalance);
+            setWalletDetails(result.wallet);
             setReferral(invite);
             setAppInfo(info);
           }
@@ -1023,8 +1031,17 @@ function App() {
       />}
       {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
       {view === 'history' && <HistoryScreen history={history} t={t} />}
-      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onWallet={() => go('wallet')} onHistory={() => go('history')} onRanks={() => go('ranks')} onRefresh={() => refreshWallet().catch((reason) => setError(reason.message))} />}
-      {view === 'wallet' && <WalletScreen wallet={wallet} t={t} onRefresh={() => Promise.all([refreshWallet(), request('/api/history')]).catch((reason) => setError(reason.message))} onError={setError} />}
+      {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onWallet={() => go('wallet')} onHistory={() => go('history')} onRanks={() => go('ranks')} onRefresh={async () => {
+        try {
+          await refreshWallet();
+          const updated = await request('/api/profile');
+          setProfile(updated);
+          setWalletDetails(updated.wallet);
+        } catch (reason) {
+          setError(reason.message);
+        }
+      }} />}
+      {view === 'wallet' && <WalletScreen wallet={wallet} walletDetails={walletDetails} t={t} onRefresh={() => refreshWallet()} onError={setError} />}
     </main>
 
     {!['cartelas', 'waiting', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
@@ -1717,6 +1734,11 @@ function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, a
         <span><small>{t.availableBalance}</small><b>{wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`}</b></span>
         <span className="profile-balance-action">＋ {t.deposit}</span>
       </button>
+      <div className="profile-wallet-breakdown">
+        <div><span>{t.bonusBalance}</span><b>{profile?.wallet?.bonusBalance === undefined ? '—' : `${money(profile.wallet.bonusBalance)} ${t.currency}`}</b></div>
+        <div><span>{t.withdrawableBalance}</span><b>{profile?.wallet?.withdrawableBalance === undefined ? '—' : `${money(profile.wallet.withdrawableBalance)} ${t.currency}`}</b></div>
+        <p>{t.bonusExplainer}</p>
+      </div>
       <div className="profile-winrate"><div><span>{t.winRate}</span><b>{winRate.toFixed(1)}%</b></div><div className="profile-progress"><i style={{ width: `${winRate}%` }} /></div></div>
       <div className="profile-quick-actions">
         <button type="button" onClick={onWallet}><span>💳</span>{t.deposit}</button>
@@ -1751,7 +1773,7 @@ function Stat({ label, value, icon, onClick }) {
   return <button type="button" className="stat" onClick={onClick}><span className="stat-icon">{icon}</span><small>{label}</small><b>{value}</b><span className="stat-link">↗</span></button>;
 }
 
-function WalletScreen({ wallet, t, onRefresh, onError }) {
+function WalletScreen({ wallet, walletDetails, t, onRefresh, onError }) {
   const [methods, setMethods] = useState([]);
   const [method, setMethod] = useState('');
   const [amount, setAmount] = useState('');
@@ -1819,7 +1841,13 @@ function WalletScreen({ wallet, t, onRefresh, onError }) {
     }
   }
   return <><div className="eyebrow">{t.sharedWallet}</div><h1 className="page-title">💰 {t.balance}</h1>
-    <section className="panel wallet-panel"><small>{t.availableBalance}</small><strong>{wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`}</strong><button className="outline-button" onClick={() => onRefresh().catch((error) => onError(error.message))}>↻ {t.refresh}</button></section>
+    <section className="panel wallet-panel"><small>{t.availableBalance}</small><strong>{wallet === null ? t.unavailable : `${money(wallet)} ${t.currency}`}</strong>
+      <div className="wallet-balance-breakdown">
+        <div><span>{t.bonusBalance}</span><b>{walletDetails?.bonusBalance === undefined ? '—' : `${money(walletDetails.bonusBalance)} ${t.currency}`}</b></div>
+        <div><span>{t.withdrawableBalance}</span><b>{walletDetails?.withdrawableBalance === undefined ? '—' : `${money(walletDetails.withdrawableBalance)} ${t.currency}`}</b></div>
+        <p>{t.bonusExplainer}</p>
+      </div>
+      <button className="outline-button" onClick={() => onRefresh().catch((error) => onError(error.message))}>↻ {t.refresh}</button></section>
     <section className="panel wallet-panel"><h2>{t.deposit}</h2>{methods.length ? <form onSubmit={submit}>
       <label>{t.paymentMethod}<select value={method} onChange={(event) => setMethod(event.target.value)}>{methods.map((item) => <option key={item.method} value={item.method}>{item.label}</option>)}</select></label>
       {current && <p className="payment-details">{current.label} · {current.accountName} · {current.account}</p>}
@@ -2225,7 +2253,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .play-smart-pill p{margin:0;color:#b9aacc;font-size:11px;line-height:1.4}
 .play-smart-pill>span{font-size:24px}
 @media(max-width:370px){.play-screen .stake-entry-card{gap:10px;margin:0 2px;padding:12px}.stake-header-row{gap:7px}.stake-icon-badge{width:42px;height:42px;font-size:20px}.stake-info-text h3{font-size:15px!important}.stake-info-text small{font-size:9px}.btn-enter-game{min-height:38px;padding:8px 10px;font-size:11px}.stake-metrics-row{gap:5px}.stake-metrics-row .metric-box{min-height:66px}.stake-metrics-row .metric-value{font-size:11px}.stake-metrics-row .metric-label{font-size:7px}.play-screen .play-smart-pill{min-height:64px;padding:9px}.play-smart-pill h2{font-size:11px}.play-smart-pill p{font-size:9px}}
-.profile-dashboard{display:grid;gap:12px;padding-bottom:12px}.profile-dashboard>.page-title{margin:0 0 2px}.profile-hero{position:relative;overflow:hidden;display:grid;gap:14px;padding:16px;border-color:#654a8a;background:radial-gradient(ellipse at 100% 0,#533283 0,transparent 48%),linear-gradient(145deg,#211034,#120a20 72%)}.profile-identity{display:flex;align-items:center;gap:12px;min-width:0}.profile-identity .avatar{flex:none;width:58px;height:58px;border-color:#facc32;background:linear-gradient(145deg,#64439a,#2a1744);color:#ffe36a;box-shadow:0 0 18px #8b5cf644}.profile-name{flex:1;min-width:0}.profile-kicker{color:#c1a5ec;font-size:8px;font-weight:900;letter-spacing:.15em}.profile-name h2{overflow:hidden;margin:2px 0;color:#fff;font-size:18px;text-overflow:ellipsis;white-space:nowrap}.profile-name p{overflow:hidden;margin:0;color:#b9aaca;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.profile-refresh{display:grid;place-items:center;flex:none;width:34px;height:34px;border:1px solid #664e81;border-radius:11px;background:#ffffff0c;color:#f0d773;font-size:20px;transition:transform .2s ease,background .2s ease}.profile-refresh:active{transform:rotate(35deg) scale(.94);background:#ffffff20}.profile-phone{margin-top:-8px;color:#baa9d0;font-size:10px}.profile-balance{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:12px;border:1px solid #66512b;border-radius:14px;background:linear-gradient(110deg,#2a2015,#1d1423);text-align:left}.profile-balance>span:first-child{display:grid;gap:2px}.profile-balance small{color:#c3b4a0;font-size:9px}.profile-balance b{color:#ffe36a;font-size:20px;font-variant-numeric:tabular-nums}.profile-balance-action{flex:none;padding:7px 9px;border-radius:9px;background:#facc32;color:#1c1302;font-size:10px;font-weight:900}.profile-winrate{display:grid;gap:6px}.profile-winrate>div:first-child{display:flex;justify-content:space-between;color:#bcaed0;font-size:10px}.profile-winrate b{color:#fff}.profile-progress{height:6px;overflow:hidden;border-radius:9px;background:#ffffff16}.profile-progress i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8b5cf6,#facc32);transition:width .5s ease}.profile-quick-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.profile-quick-actions button{display:grid;justify-items:center;gap:5px;min-width:0;padding:10px 4px;border:1px solid #433154;border-radius:12px;background:#ffffff08;color:#e8dff2;font-size:10px;font-weight:750;transition:transform .15s ease,border-color .15s ease,background .15s ease}.profile-quick-actions button:active{transform:scale(.96);border-color:#9875c4;background:#ffffff14}.profile-quick-actions button span{font-size:18px}.profile-dashboard>.profile-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.profile-stats .stat{position:relative;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;align-items:center;gap:4px 8px;min-width:0;padding:12px;border:1px solid #382848;border-radius:13px;background:linear-gradient(145deg,#1b1028,#120b1d);text-align:left;transition:transform .15s ease,border-color .15s ease}.profile-stats .stat:active{transform:translateY(1px);border-color:#8b5cf6}.profile-stats .stat-icon{grid-row:1 / span 2;font-size:20px}.profile-stats .stat small{overflow:hidden;grid-column:2 / span 2;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat b{overflow:hidden;grid-column:2;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat-link{grid-column:3;grid-row:2;color:#a78bfa;font-size:12px}.profile-dashboard>.settings{border-color:#433154;background:linear-gradient(145deg,#1b1028,#120b1d)}.profile-dashboard .settings h2{margin:0 0 8px;font-size:15px}.profile-dashboard .language-control button{border:1px solid #49365c;border-radius:9px;background:#140b20;color:#cbbbdc;padding:7px 9px;font-size:10px}.profile-dashboard .language-control button.selected{border-color:#facc32;background:#332713;color:#ffe36a}
+.profile-dashboard{display:grid;gap:12px;padding-bottom:12px}.profile-dashboard>.page-title{margin:0 0 2px}.profile-hero{position:relative;overflow:hidden;display:grid;gap:14px;padding:16px;border-color:#654a8a;background:radial-gradient(ellipse at 100% 0,#533283 0,transparent 48%),linear-gradient(145deg,#211034,#120a20 72%)}.profile-identity{display:flex;align-items:center;gap:12px;min-width:0}.profile-identity .avatar{flex:none;width:58px;height:58px;border-color:#facc32;background:linear-gradient(145deg,#64439a,#2a1744);color:#ffe36a;box-shadow:0 0 18px #8b5cf644}.profile-name{flex:1;min-width:0}.profile-kicker{color:#c1a5ec;font-size:8px;font-weight:900;letter-spacing:.15em}.profile-name h2{overflow:hidden;margin:2px 0;color:#fff;font-size:18px;text-overflow:ellipsis;white-space:nowrap}.profile-name p{overflow:hidden;margin:0;color:#b9aaca;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.profile-refresh{display:grid;place-items:center;flex:none;width:34px;height:34px;border:1px solid #664e81;border-radius:11px;background:#ffffff0c;color:#f0d773;font-size:20px;transition:transform .2s ease,background .2s ease}.profile-refresh:active{transform:rotate(35deg) scale(.94);background:#ffffff20}.profile-phone{margin-top:-8px;color:#baa9d0;font-size:10px}.profile-balance{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:12px;border:1px solid #66512b;border-radius:14px;background:linear-gradient(110deg,#2a2015,#1d1423);text-align:left}.profile-balance>span:first-child{display:grid;gap:2px}.profile-balance small{color:#c3b4a0;font-size:9px}.profile-balance b{color:#ffe36a;font-size:20px;font-variant-numeric:tabular-nums}.profile-balance-action{flex:none;padding:7px 9px;border-radius:9px;background:#facc32;color:#1c1302;font-size:10px;font-weight:900}.profile-wallet-breakdown,.wallet-balance-breakdown{display:grid;gap:7px;padding:10px 12px;border:1px solid #ffffff12;border-radius:12px;background:#10091b88}.profile-wallet-breakdown>div,.wallet-balance-breakdown>div{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#c6b7d8;font-size:10px}.profile-wallet-breakdown b,.wallet-balance-breakdown b{color:#f4e9ff;font-variant-numeric:tabular-nums}.profile-wallet-breakdown p,.wallet-balance-breakdown p{margin:0;color:#aa9cba;font-size:9px;line-height:1.4}.profile-winrate{display:grid;gap:6px}.profile-winrate>div:first-child{display:flex;justify-content:space-between;color:#bcaed0;font-size:10px}.profile-winrate b{color:#fff}.profile-progress{height:6px;overflow:hidden;border-radius:9px;background:#ffffff16}.profile-progress i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8b5cf6,#facc32);transition:width .5s ease}.profile-quick-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.profile-quick-actions button{display:grid;justify-items:center;gap:5px;min-width:0;padding:10px 4px;border:1px solid #433154;border-radius:12px;background:#ffffff08;color:#e8dff2;font-size:10px;font-weight:750;transition:transform .15s ease,border-color .15s ease,background .15s ease}.profile-quick-actions button:active{transform:scale(.96);border-color:#9875c4;background:#ffffff14}.profile-quick-actions button span{font-size:18px}.profile-dashboard>.profile-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.profile-stats .stat{position:relative;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;align-items:center;gap:4px 8px;min-width:0;padding:12px;border:1px solid #382848;border-radius:13px;background:linear-gradient(145deg,#1b1028,#120b1d);text-align:left;transition:transform .15s ease,border-color .15s ease}.profile-stats .stat:active{transform:translateY(1px);border-color:#8b5cf6}.profile-stats .stat-icon{grid-row:1 / span 2;font-size:20px}.profile-stats .stat small{overflow:hidden;grid-column:2 / span 2;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat b{overflow:hidden;grid-column:2;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat-link{grid-column:3;grid-row:2;color:#a78bfa;font-size:12px}.profile-dashboard>.settings{border-color:#433154;background:linear-gradient(145deg,#1b1028,#120b1d)}.profile-dashboard .settings h2{margin:0 0 8px;font-size:15px}.profile-dashboard .language-control button{border:1px solid #49365c;border-radius:9px;background:#140b20;color:#cbbbdc;padding:7px 9px;font-size:10px}.profile-dashboard .language-control button.selected{border-color:#facc32;background:#332713;color:#ffe36a}
 @media(min-width:600px){.profile-dashboard{gap:14px}.profile-hero{padding:20px}.profile-dashboard>.profile-stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
 `;
 

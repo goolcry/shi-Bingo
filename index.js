@@ -33,13 +33,6 @@ if (new Set([process.env.WEBHOOK_SECRET, process.env.SETUP_SECRET, process.env.C
   throw new Error('WEBHOOK_SECRET, SETUP_SECRET, and CRON_SECRET must be different values.');
 }
 
-function validConfiguredMoney(value) {
-  if (!/^\d{1,16}(?:\.\d{1,2})?$/.test(value)) {
-    throw new Error('REFERRAL_REWARD must be a non-negative amount with at most two decimal places.');
-  }
-  return value;
-}
-
 const config = {
   botToken: process.env.BOT_TOKEN,
   adminId: adminIds[0],
@@ -68,7 +61,7 @@ const config = {
     },
   ],
   withdrawalMinimum: '50.00',
-  referralReward: validConfiguredMoney(process.env.REFERRAL_REWARD || '0'),
+  referralReward: '5.00',
 };
 
 const pool = mysql.createPool({
@@ -167,10 +160,22 @@ function initializeSchema() {
         CREATE TABLE IF NOT EXISTS wallets (
           telegram_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
           balance DECIMAL(20, 2) NOT NULL DEFAULT 0.00,
+          bonus_balance DECIMAL(20, 2) NOT NULL DEFAULT 0.00,
           updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           CONSTRAINT fk_wallet_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      const [walletBonusColumn] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'wallets' AND column_name = 'bonus_balance'`,
+      );
+      if (!Number(walletBonusColumn[0].count)) {
+        try {
+          await pool.query('ALTER TABLE wallets ADD COLUMN bonus_balance DECIMAL(20, 2) NOT NULL DEFAULT 0.00');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
       await pool.query(`
         CREATE TABLE IF NOT EXISTS deposit_requests (
           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -284,6 +289,11 @@ function initializeSchema() {
           CONSTRAINT fk_referral_referred FOREIGN KEY (referred_telegram_id) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      await pool.execute(
+        `UPDATE referral_relationships SET reward_amount = ?
+         WHERE status = 'PENDING' AND reward_amount = 0.00`,
+        [config.referralReward],
+      );
       await pool.query(`
         CREATE TABLE IF NOT EXISTS withdrawal_requests (
           id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -454,6 +464,7 @@ function initializeSchema() {
           cartela_number INT UNSIGNED NOT NULL,
           telegram_id BIGINT UNSIGNED NOT NULL,
           amount DECIMAL(20, 2) NOT NULL,
+          bonus_amount DECIMAL(20, 2) NOT NULL DEFAULT 0.00,
           status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           released_at TIMESTAMP NULL,
@@ -463,6 +474,17 @@ function initializeSchema() {
           CONSTRAINT fk_reservation_user FOREIGN KEY (telegram_id) REFERENCES users (telegram_id)
         ) ENGINE=InnoDB
       `);
+      const [reservationBonusColumn] = await pool.execute(
+        `SELECT COUNT(*) AS count FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'cartela_reservations' AND column_name = 'bonus_amount'`,
+      );
+      if (!Number(reservationBonusColumn[0].count)) {
+        try {
+          await pool.query('ALTER TABLE cartela_reservations ADD COLUMN bonus_amount DECIMAL(20, 2) NOT NULL DEFAULT 0.00');
+        } catch (error) {
+          if (error.code !== 'ER_DUP_FIELDNAME' && error.errno !== 1060) throw error;
+        }
+      }
       await pool.query(`
         CREATE TABLE IF NOT EXISTS game_calls (
           room_id BIGINT UNSIGNED NOT NULL,
@@ -665,6 +687,42 @@ function keyboardFor(lang, telegramId) {
   };
 }
 
+function normalizedMenuLabel(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    .replace(/[\u200B-\u200D\uFEFF\uFE0E\uFE0F]/g, '')
+    .replace(/\s+/g, '')
+    .toLocaleLowerCase();
+}
+
+function menuActionForInput(input) {
+  const commands = {
+    play: /^\/play(?:@\w+)?$/i,
+    balance: /^\/balance(?:@\w+)?$/i,
+    profile: /^\/profile(?:@\w+)?$/i,
+    deposit: /^\/deposit(?:@\w+)?$/i,
+    withdraw: /^\/withdraw(?:@\w+)?$/i,
+    invite: /^\/invite(?:@\w+)?$/i,
+    channel: /^\/channel(?:@\w+)?$/i,
+    support: /^\/support(?:@\w+)?$/i,
+    language: /^\/language(?:@\w+)?$/i,
+    history: /^\/history(?:@\w+)?$/i,
+  };
+  const raw = String(input || '').trim();
+  for (const [action, command] of Object.entries(commands)) {
+    if (command.test(raw)) return action;
+  }
+  const normalized = normalizedMenuLabel(raw);
+  if (!normalized) return null;
+  for (const action of Object.keys(commands)) {
+    if (Object.values(text).some((translation) => normalized === normalizedMenuLabel(translation[action]))) {
+      return action;
+    }
+  }
+  return null;
+}
+
 function phoneRequestKeyboard() {
   return {
     keyboard: [[{
@@ -842,7 +900,7 @@ async function getUser(id) {
 
 async function getAvailableBalance(telegramId, connection = pool) {
   const [rows] = await connection.execute(
-    `SELECT w.balance,
+    `SELECT w.balance, w.bonus_balance,
        COALESCE((SELECT SUM(r.amount) FROM withdrawal_requests r
                  WHERE r.telegram_id = w.telegram_id AND r.status = 'PENDING'), 0.00) AS reserved
      FROM wallets w WHERE w.telegram_id = ?`,
@@ -851,6 +909,30 @@ async function getAvailableBalance(telegramId, connection = pool) {
   if (!rows[0]) throw new Error('Wallet not found.');
   const available = decimalToMinorUnits(rows[0].balance) - decimalToMinorUnits(rows[0].reserved);
   return minorUnitsToDecimal(available);
+}
+
+async function getBonusBalance(telegramId, connection = pool) {
+  const [rows] = await connection.execute(
+    'SELECT bonus_balance FROM wallets WHERE telegram_id = ?',
+    [String(telegramId)],
+  );
+  if (!rows[0]) throw new Error('Wallet not found.');
+  return formatAmount(rows[0].bonus_balance);
+}
+
+async function getWithdrawableBalance(telegramId, connection = pool) {
+  const [rows] = await connection.execute(
+    `SELECT w.balance, w.bonus_balance,
+       COALESCE((SELECT SUM(r.amount) FROM withdrawal_requests r
+                 WHERE r.telegram_id = w.telegram_id AND r.status = 'PENDING'), 0.00) AS reserved
+     FROM wallets w WHERE w.telegram_id = ?`,
+    [String(telegramId)],
+  );
+  if (!rows[0]) throw new Error('Wallet not found.');
+  const available = decimalToMinorUnits(rows[0].balance)
+    - decimalToMinorUnits(rows[0].bonus_balance)
+    - decimalToMinorUnits(rows[0].reserved);
+  return minorUnitsToDecimal(available > 0n ? available : 0n);
 }
 
 async function getUserFlow(telegramId) {
@@ -1008,11 +1090,11 @@ async function createWithdrawalRequest(telegramId, amountInput, method, detailsI
   try {
     await connection.beginTransaction();
     const [wallets] = await connection.execute(
-      'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+      'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
       [String(telegramId)],
     );
     if (!wallets[0]) throw new Error('Wallet not found.');
-    const availableBalance = await getAvailableBalance(telegramId, connection);
+    const availableBalance = await getWithdrawableBalance(telegramId, connection);
     if (decimalToMinorUnits(amount) > decimalToMinorUnits(availableBalance)) {
       throw Object.assign(new Error(text.en.insufficientFunds), { status: 400 });
     }
@@ -1090,13 +1172,22 @@ async function reviewWithdrawal(id, decision, adminId, reason = '') {
     let balanceAfter = null;
     if (decision === 'APPROVED') {
       const [wallets] = await connection.execute(
-        'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+        'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
         [String(request.telegram_id)],
       );
       if (!wallets[0]) throw new Error(`Wallet not found for withdrawal ${id}.`);
       const balanceBefore = formatAmount(wallets[0].balance);
-      if (decimalToMinorUnits(balanceBefore) < decimalToMinorUnits(request.amount)) {
-        throw new Error(`Wallet balance is insufficient to approve withdrawal ${id}.`);
+      const [[pendingWithdrawalsTotal]] = await connection.execute(
+        `SELECT COALESCE(SUM(amount), 0.00) AS reserved
+         FROM withdrawal_requests
+         WHERE telegram_id = ? AND status = 'PENDING' AND id <> ?`,
+        [String(request.telegram_id), id],
+      );
+      const withdrawable = decimalToMinorUnits(balanceBefore)
+        - decimalToMinorUnits(wallets[0].bonus_balance)
+        - decimalToMinorUnits(pendingWithdrawalsTotal.reserved);
+      if (withdrawable < decimalToMinorUnits(request.amount)) {
+        throw new Error(`Withdrawable wallet balance is insufficient to approve withdrawal ${id}.`);
       }
       balanceAfter = minorUnitsToDecimal(
         decimalToMinorUnits(balanceBefore) - decimalToMinorUnits(request.amount),
@@ -1247,9 +1338,10 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
         ],
       );
       const [qualified] = await connection.execute(
-        `UPDATE referral_relationships SET status = 'QUALIFIED', qualified_at = CURRENT_TIMESTAMP
+        `UPDATE referral_relationships
+         SET status = 'QUALIFIED', reward_amount = ?, qualified_at = CURRENT_TIMESTAMP
          WHERE referred_telegram_id = ? AND status = 'PENDING'`,
-        [String(deposit.telegram_id)],
+        [config.referralReward, String(deposit.telegram_id)],
       );
       if (qualified.affectedRows) {
         const [referralRows] = await connection.execute(
@@ -1260,7 +1352,7 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
         const referral = referralRows[0];
         if (referral && decimalToMinorUnits(referral.reward_amount) > 0n) {
           const [referrerWallets] = await connection.execute(
-            'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+            'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
             [String(referral.referrer_telegram_id)],
           );
           if (!referrerWallets[0]) throw new Error(`Referrer wallet missing for referral ${referral.id}.`);
@@ -1268,9 +1360,12 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
           const after = minorUnitsToDecimal(
             decimalToMinorUnits(before) + decimalToMinorUnits(referral.reward_amount),
           );
+          const bonusAfter = minorUnitsToDecimal(
+            decimalToMinorUnits(referrerWallets[0].bonus_balance) + decimalToMinorUnits(referral.reward_amount),
+          );
           await connection.execute(
-            'UPDATE wallets SET balance = ? WHERE telegram_id = ?',
-            [after, String(referral.referrer_telegram_id)],
+            'UPDATE wallets SET balance = ?, bonus_balance = ? WHERE telegram_id = ?',
+            [after, bonusAfter, String(referral.referrer_telegram_id)],
           );
           await connection.execute(
             `INSERT INTO wallet_transactions
@@ -1285,6 +1380,7 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
               `Referral reward for referral #${referral.id}`,
             ],
           );
+          outcome = { referralTelegramId: String(referral.referrer_telegram_id), referralBonus: formatAmount(referral.reward_amount) };
         }
       }
     }
@@ -1306,6 +1402,7 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
       telegramId: String(deposit.telegram_id),
       amount: formatAmount(deposit.amount),
       balanceAfter,
+      ...(outcome || {}),
     };
   } catch (error) {
     await connection.rollback();
@@ -1324,6 +1421,18 @@ async function reviewDeposit(id, decision, adminId, reason = '') {
       await telegramApi('sendMessage', { chat_id: outcome.telegramId, text: notice });
     } catch (error) {
       console.error(`User notification failed for deposit #${id}:`, error.message);
+    }
+    if (outcome.referralTelegramId && outcome.referralBonus) {
+      try {
+        const referrer = await getUser(outcome.referralTelegramId);
+        const lang = languageOf(referrer?.language);
+        const bonusMessage = lang === 'am'
+          ? `🎁 የግብዣ ጉርሻ! የጋበዙት ጓደኛ የመጀመሪያ ዲፖዚት ጸድቋል። ${outcome.referralBonus} ብር ሊጫወቱበት የሚችል ጉርሻ ተጨምሯል። ጉርሻው በቀጥታ ሊወጣ አይችልም።`
+          : `🎁 Referral bonus! Your invited friend's first deposit was approved. ${outcome.referralBonus} BIRR in playable bonus was added to your wallet. Bonus funds cannot be withdrawn directly.`;
+        await telegramApi('sendMessage', { chat_id: outcome.referralTelegramId, text: bonusMessage });
+      } catch (error) {
+        console.error(`Referral reward notification failed for deposit #${id}:`, error.message);
+      }
     }
   }
   return outcome;
@@ -1571,6 +1680,8 @@ async function getProfile(telegramId) {
   const user = await getUser(telegramId);
   if (!user) throw new Error('User profile not found.');
   const availableBalance = await getAvailableBalance(telegramId);
+  const withdrawableBalance = await getWithdrawableBalance(telegramId);
+  const bonusBalance = await getBonusBalance(telegramId);
   const [[referrals]] = await pool.execute(
     `SELECT COUNT(*) AS total,
        SUM(CASE WHEN status = 'QUALIFIED' THEN 1 ELSE 0 END) AS qualified
@@ -1590,6 +1701,8 @@ async function getProfile(telegramId) {
   return {
     user,
     availableBalance,
+    bonusBalance,
+    withdrawableBalance,
     referralCount: Number(referrals.qualified || 0),
     referralInvites: Number(referrals.total || 0),
     gamesPlayed: Number(played.total || 0),
@@ -1635,7 +1748,7 @@ async function sendDepositChoices(chatId, lang) {
 }
 
 async function beginWithdrawal(chatId, telegramId, lang) {
-  const available = await getAvailableBalance(telegramId);
+  const available = await getWithdrawableBalance(telegramId);
   if (decimalToMinorUnits(available) < decimalToMinorUnits(config.withdrawalMinimum)) {
     return telegramApi('sendMessage', {
       chat_id: chatId,
@@ -1699,7 +1812,9 @@ async function sendProfile(chatId, telegramId, lang) {
     `Username: ${username}`,
     `Phone: ${user.phone_number || 'Not verified'}`,
     `Telegram ID: ${user.telegram_id}`,
-    `Available balance: ${profile.availableBalance} BIRR`,
+    `Available play balance: ${profile.availableBalance} BIRR`,
+    `Referral bonus (play only): ${profile.bonusBalance} BIRR`,
+    `Withdrawable balance: ${profile.withdrawableBalance} BIRR`,
     `Successful referrals: ${profile.referralCount}`,
     `Games played: ${profile.gamesPlayed}`,
     `Games won: ${profile.gamesWon}`,
@@ -1901,7 +2016,7 @@ async function handleUserFlow(message, user, lang) {
       });
       return true;
     }
-    const availableBalance = await getAvailableBalance(user.id);
+    const availableBalance = await getWithdrawableBalance(user.id);
     if (decimalToMinorUnits(amount) > decimalToMinorUnits(availableBalance)) {
       await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].insufficientFunds });
       return true;
@@ -3091,7 +3206,7 @@ async function selectCartelaHandler(req, res, next) {
       throw Object.assign(new Error(`Maximum ${maxCartelasPerPlayer} cartelas allowed per room.`), { status: 400 });
     }
     const [[wallet]] = await connection.execute(
-      'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+      'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
       [String(req.telegramUser.id)],
     );
     if (!wallet) throw new Error('Wallet not found.');
@@ -3105,18 +3220,21 @@ async function selectCartelaHandler(req, res, next) {
     }
     const before = decimalToMinorUnits(wallet.balance);
     const after = before - cost;
+    const bonusBefore = decimalToMinorUnits(wallet.bonus_balance);
+    const bonusSpent = bonusBefore < cost ? bonusBefore : cost;
+    const bonusAfter = bonusBefore - bonusSpent;
     const [reservation] = await connection.execute(
-      `INSERT INTO cartela_reservations (room_id, cartela_number, telegram_id, amount)
-       VALUES (?, ?, ?, ?)`,
-      [room.id, number, String(req.telegramUser.id), formatAmount(room.stake)],
+      `INSERT INTO cartela_reservations (room_id, cartela_number, telegram_id, amount, bonus_amount)
+       VALUES (?, ?, ?, ?, ?)`,
+      [room.id, number, String(req.telegramUser.id), formatAmount(room.stake), minorUnitsToDecimal(bonusSpent)],
     );
     await connection.execute(
       'UPDATE cartela_slots SET owner_telegram_id = ? WHERE room_id = ? AND cartela_number = ?',
       [String(req.telegramUser.id), room.id, number],
     );
     await connection.execute(
-      'UPDATE wallets SET balance = ? WHERE telegram_id = ?',
-      [minorUnitsToDecimal(after), String(req.telegramUser.id)],
+      'UPDATE wallets SET balance = ?, bonus_balance = ? WHERE telegram_id = ?',
+      [minorUnitsToDecimal(after), minorUnitsToDecimal(bonusAfter), String(req.telegramUser.id)],
     );
     await connection.execute(
       `INSERT INTO wallet_transactions
@@ -3176,20 +3294,21 @@ async function deselectCartelaHandler(req, res, next) {
       throw Object.assign(new Error('You do not own that cartela.'), { status: 404 });
     }
     const [[reservation]] = await connection.execute(
-      `SELECT id, amount FROM cartela_reservations
+      `SELECT id, amount, bonus_amount FROM cartela_reservations
        WHERE room_id = ? AND cartela_number = ? AND telegram_id = ? AND status = 'ACTIVE'
        ORDER BY id DESC LIMIT 1 FOR UPDATE`,
       [room.id, number, String(req.telegramUser.id)],
     );
     const [[wallet]] = await connection.execute(
-      'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+      'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
       [String(req.telegramUser.id)],
     );
     if (!reservation || !wallet) throw new Error('Cartela reservation or wallet was not found.');
     const before = decimalToMinorUnits(wallet.balance);
     const after = before + decimalToMinorUnits(reservation.amount);
-    await connection.execute('UPDATE wallets SET balance = ? WHERE telegram_id = ?', [
-      minorUnitsToDecimal(after), String(req.telegramUser.id),
+    const bonusAfter = decimalToMinorUnits(wallet.bonus_balance) + decimalToMinorUnits(reservation.bonus_amount);
+    await connection.execute('UPDATE wallets SET balance = ?, bonus_balance = ? WHERE telegram_id = ?', [
+      minorUnitsToDecimal(after), minorUnitsToDecimal(bonusAfter), String(req.telegramUser.id),
     ]);
     await connection.execute(
       `UPDATE cartela_reservations SET status = 'RETURNED', released_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -3254,19 +3373,21 @@ app.post('/api/rooms/:id/leave', authenticatedTelegramUser, async (req, res, nex
     if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
     if (room.status !== 'WAITING') throw Object.assign(new Error('You cannot leave after the game starts.'), { status: 409 });
     const [reservations] = await connection.execute(
-      `SELECT id, cartela_number, amount FROM cartela_reservations
+      `SELECT id, cartela_number, amount, bonus_amount FROM cartela_reservations
        WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE' FOR UPDATE`,
       [room.id, String(req.telegramUser.id)],
     );
     if (reservations.length) {
       const [[wallet]] = await connection.execute(
-        'SELECT balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
+        'SELECT balance, bonus_balance FROM wallets WHERE telegram_id = ? FOR UPDATE',
         [String(req.telegramUser.id)],
       );
       let balance = decimalToMinorUnits(wallet.balance);
+      let bonusBalance = decimalToMinorUnits(wallet.bonus_balance);
       for (const reservation of reservations) {
         const before = balance;
         balance += decimalToMinorUnits(reservation.amount);
+        bonusBalance += decimalToMinorUnits(reservation.bonus_amount);
         await connection.execute(
           `UPDATE cartela_reservations SET status = 'RETURNED', released_at = CURRENT_TIMESTAMP WHERE id = ?`,
           [reservation.id],
@@ -3285,8 +3406,8 @@ app.post('/api/rooms/:id/leave', authenticatedTelegramUser, async (req, res, nex
           ],
         );
       }
-      await connection.execute('UPDATE wallets SET balance = ? WHERE telegram_id = ?', [
-        minorUnitsToDecimal(balance), String(req.telegramUser.id),
+      await connection.execute('UPDATE wallets SET balance = ?, bonus_balance = ? WHERE telegram_id = ?', [
+        minorUnitsToDecimal(balance), minorUnitsToDecimal(bonusBalance), String(req.telegramUser.id),
       ]);
       const refund = reservations.reduce((sum, item) => sum + decimalToMinorUnits(item.amount), 0n);
       await connection.execute('UPDATE bingo_rooms SET prize_pool = prize_pool - ? WHERE id = ?', [
@@ -3423,7 +3544,12 @@ app.get('/api/me', authenticatedTelegramUser, async (req, res, next) => {
         username: user.username,
         language: user.language,
       },
-      wallet: { balance: availableBalance, currency: 'BIRR' },
+      wallet: {
+        balance: availableBalance,
+        bonusBalance: formatAmount(await getBonusBalance(identity.id)),
+        withdrawableBalance: await getWithdrawableBalance(identity.id),
+        currency: 'BIRR',
+      },
       features: {
         deposits: config.paymentMethods.length > 0,
         withdrawals: true,
@@ -3465,7 +3591,12 @@ app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
         language: profile.user.language,
         phoneNumber: profile.user.phone_number,
       },
-      wallet: { availableBalance: profile.availableBalance, currency: 'BIRR' },
+      wallet: {
+        availableBalance: profile.availableBalance,
+        bonusBalance: profile.bonusBalance,
+        withdrawableBalance: profile.withdrawableBalance,
+        currency: 'BIRR',
+      },
       referrals: { successful: profile.referralCount, total: profile.referralInvites },
       games: {
         played: Number(gameStats.played),
@@ -3934,6 +4065,8 @@ app.post('/telegram/webhook', async (req, res, next) => {
     const input = String(message.text || '').trim();
     const startMatch = /^\/start(?:@\w+)?(?:\s+(.+))?$/i.exec(input);
     if (startMatch?.[1]) await attributeReferral(user.id, startMatch[1]);
+    const menuAction = menuActionForInput(input);
+    if (startMatch || menuAction) await clearUserFlow(user.id);
     if (message.contact) {
       if (Number(message.contact.user_id) !== Number(message.from.id)) {
         await telegramApi('sendMessage', {
@@ -3984,13 +4117,13 @@ app.post('/telegram/webhook', async (req, res, next) => {
       }
       return res.sendStatus(200);
     }
-    if (await handleAdminBroadcastMessage(message, user)) return res.sendStatus(200);
-    if (await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
+    if (!menuAction && !startMatch && await handleAdminBroadcastMessage(message, user)) return res.sendStatus(200);
+    if (!menuAction && !startMatch && await handleAdminRejectFlow(message, user, lang)) return res.sendStatus(200);
     if (!savedUser?.phone_number) {
       await requestPhoneNumber(message.chat.id);
       return res.sendStatus(200);
     }
-    if (await handleUserFlow(message, user, lang)) return res.sendStatus(200);
+    if (!menuAction && !startMatch && await handleUserFlow(message, user, lang)) return res.sendStatus(200);
 
     if (startMatch) {
       let welcome = `👋 Welcome back, ${savedUser.first_name}! / እንኳን ደህና መጡ!\nYou are already registered.`;
@@ -4000,22 +4133,22 @@ app.post('/telegram/webhook', async (req, res, next) => {
         text: welcome,
         reply_markup: keyboardFor(lang, user.id),
       });
-    } else if (/^\/play(?:@\w+)?$/i.test(input) || input === t.play) {
+    } else if (menuAction === 'play') {
       await sendPlayEntry(message.chat.id, user.id, lang);
-    } else if (/^\/balance(?:@\w+)?$/i.test(input) || input === t.balance) {
+    } else if (menuAction === 'balance') {
       const profile = await getProfile(user.id);
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
-        text: `💰 YOUR WALLET\n\nAvailable Balance: ${profile.availableBalance} BIRR`,
+        text: `💰 YOUR WALLET\n\nAvailable play balance: ${profile.availableBalance} BIRR\nReferral bonus (play only): ${profile.bonusBalance} BIRR\nWithdrawable balance: ${profile.withdrawableBalance} BIRR`,
         reply_markup: walletActionsKeyboard(lang),
       });
-    } else if (input === t.profile || /^\/profile(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'profile') {
       await sendProfile(message.chat.id, user.id, lang);
-    } else if (input === t.deposit || /^\/deposit(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'deposit') {
       await sendDepositChoices(message.chat.id, lang);
-    } else if (input === t.withdraw || /^\/withdraw(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'withdraw') {
       await beginWithdrawal(message.chat.id, user.id, lang);
-    } else if (input === t.invite || /^\/invite(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'invite') {
       const invite = await getInviteDetails(user.id);
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
@@ -4027,7 +4160,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           ]],
         },
       });
-    } else if (input === t.support || /^\/support(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'support') {
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
         text: t.supportPrompt,
@@ -4042,7 +4175,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           reply_markup: { inline_keyboard: [[{ text: 'Contact support', url: contactUrl }]] },
         });
       }
-    } else if (input === t.channel || /^\/channel(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'channel') {
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
         text: '📢 Join Official Channel / ቻናላችንን ይቀላቀሉ',
@@ -4106,7 +4239,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           }
         }
       }
-    } else if (input === t.language || /^\/language(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'language') {
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
         text: t.chooseLanguage,
@@ -4117,7 +4250,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           ]],
         },
       });
-    } else if (input === t.history || /^\/history(?:@\w+)?$/i.test(input)) {
+    } else if (menuAction === 'history') {
       await sendHistory(message.chat.id, user.id, lang);
     } else if (/^\/cancel$/i.test(input)) {
       await telegramApi('sendMessage', { chat_id: message.chat.id, text: t.cancelled, reply_markup: keyboardFor(lang) });
