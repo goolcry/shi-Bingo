@@ -85,6 +85,8 @@ const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
 const roomCountdownSeconds = 30;
 const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
+const minimumDeposit = '20.00';
+const supportUrl = 'https://t.me/bigbards';
 const activeRoomCartelaCache = new Map();
 const roomCartelaCacheWarmups = new Map();
 const cartelaSyncAuthCache = new Map();
@@ -556,10 +558,9 @@ const text = {
     notConfigured: 'This feature is not enabled yet. No money has been moved.',
     chooseLanguage: 'Choose your language:',
     languageSaved: 'Language updated.',
-    supportInfo: 'For help, contact the support team.',
     channelUnavailable: 'The official channel link is not configured yet.',
     choosePaymentMethod: 'Choose a deposit method:',
-    enterDepositAmount: 'Enter the amount in BIRR.',
+    enterDepositAmount: 'Enter the amount in BIRR. Minimum deposit: 20.00 BIRR / ዝቅተኛው ተቀማጭ 20.00 ብር።',
     enterDepositReference: 'Enter the transaction/reference ID from your payment.',
     withdrawalInfo: (balance, minimum) => `Available balance: ${balance} BIRR\nMinimum withdrawal: ${minimum} BIRR\nFee: 0 BIRR\nPending requests reserve their amount until approved or rejected.\n\nEnter the amount to withdraw, or Cancel.`,
     withdrawalMethod: 'Choose how you want to receive the withdrawal:',
@@ -575,7 +576,6 @@ const text = {
     profileTitle: '👤 YOUR PROFILE',
     historyEmpty: 'No wallet transactions yet.',
     inviteInfo: (url, count) => `🔗 Invite friends to SHISHO BINGO\n\nYour invite link:\n${url}\n\nSuccessful referrals: ${count}\nReferral reward, if enabled, is granted after your invited friend’s first approved deposit.`,
-    supportPrompt: 'What do you need help with?',
     channelJoin: 'Join the official SHISHO BINGO channel, then verify your membership.',
     channelVerified: 'Channel membership verified.',
     channelNotMember: 'You are not yet a member of the official channel.',
@@ -607,10 +607,9 @@ const text = {
     notConfigured: 'ይህ አገልግሎት ገና አልተዘጋጀም። ምንም ገንዘብ አልተንቀሳቀሰም።',
     chooseLanguage: 'ቋንቋዎን ይምረጡ፦',
     languageSaved: 'ቋንቋው ተቀይሯል።',
-    supportInfo: 'ለእርዳታ የድጋፍ ቡድኑን ያነጋግሩ።',
     channelUnavailable: 'የኦፊሴላዊው ቻናል አድራሻ ገና አልተዘጋጀም።',
     choosePaymentMethod: 'የገንዘብ ማስገቢያ ዘዴ ይምረጡ፦',
-    enterDepositAmount: 'መጠኑን በብር ያስገቡ።',
+    enterDepositAmount: 'መጠኑን በብር ያስገቡ። ዝቅተኛ ተቀማጭ፦ 20.00 ብር።',
     enterDepositReference: 'ከክፍያዎ የግብይት መለያ ያስገቡ።',
     withdrawalInfo: (balance, minimum) => `ያለ ቀሪ ሂሳብ፦ ${balance} ብር\nዝቅተኛ የማውጫ መጠን፦ ${minimum} ብር\nክፍያ፦ 0 ብር\nየሚጠባበቁ ጥያቄዎች እስኪጸድቁ ወይም ውድቅ እስኪደረጉ ድረስ ገንዘቡን ይይዛሉ።\n\nለማውጣት የሚፈልጉትን መጠን ያስገቡ ወይም Cancel ይጫኑ።`,
     withdrawalMethod: 'ገንዘቡን የሚቀበሉበትን ዘዴ ይምረጡ፦',
@@ -626,7 +625,6 @@ const text = {
     profileTitle: '👤 የእርስዎ መገለጫ',
     historyEmpty: 'ገና የኪስ ቦርሳ ግብይቶች የሉም።',
     inviteInfo: (url, count) => `🔗 ጓደኞችዎን ወደ SHISHO BINGO ይጋብዙ።\n\nየግብዣ አገናኝዎ፦\n${url}\n\nየተሳኩ ግብዣዎች፦ ${count}\nሽልማት ከነቃ በተጋበዘው ሰው የመጀመሪያ የጸደቀ ገንዘብ ማስገባት በኋላ ይሰጣል።`,
-    supportPrompt: 'እርዳታ የሚፈልጉበትን ይምረጡ።',
     channelJoin: 'ወደ ኦፊሴላዊው SHISHO BINGO ቻናል ይቀላቀሉ፣ ከዚያ አባልነትዎን ያረጋግጡ።',
     channelVerified: 'የቻናል አባልነት ተረጋግጧል።',
     channelNotMember: 'እስካሁን የኦፊሴላዊው ቻናል አባል አይደሉም።',
@@ -1001,18 +999,27 @@ function withdrawalReviewKeyboard(id) {
   };
 }
 
-function supportKeyboard(lang) {
-  const t = text[lang];
+function supportKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: '💳 ' + t.deposit.replace(/^💳\s*/, ''), callback_data: 'help:deposits' },
-        { text: '💸 ' + t.withdraw.replace(/^💸\s*/, ''), callback_data: 'help:withdrawals' }],
-      [{ text: '💰 ' + t.balance.replace(/^💰\s*/, ''), callback_data: 'help:wallet' },
-        { text: '🎟 Cartelas', callback_data: 'help:cartela' }],
-      [{ text: '🎮 Game rules', callback_data: 'help:rules' },
-        { text: '🛠 Technical', callback_data: 'help:technical' }],
+      [{ text: '📩 Contact Support / ድጋፍ ሰጪ', url: supportUrl }],
+      [{ text: '📢 Official Channel / ቻናል', url: officialChannelUrl }],
     ],
   };
+}
+
+function supportCenterText() {
+  return [
+    '💬 SHISHO BINGO SUPPORT & HELP CENTER',
+    'የሺሾ ቢንጎ የደንበኞች ድጋፍ መስጫ',
+    '',
+    'Need help with deposits, withdrawals, or gameplay? Our support team is ready to assist you.',
+    'ገንዘብ ገቢ ወይም ወጪ ለማድረግ፣ እንዲሁም ስለ ጨዋታው ማንኛውም ጥያቄ ካለዎት ድጋፍ ሰጪዎቻችንን ያነጋግሩ።',
+    '',
+    '📌 Direct Support: @bigbards',
+    '📢 Official Channel: https://t.me/+D2i3HE1qVKk4NDU8',
+    '⚠️ Security Notice: Never share passwords, SMS codes, or payment PINs.',
+  ].join('\n');
 }
 
 async function notifyAdminOfDeposit(request) {
@@ -1258,6 +1265,12 @@ async function createDepositRequest(telegramUser, method, amountInput, providerR
   const configuredMethod = config.paymentMethods.find((item) => item.method === method);
   if (!configuredMethod) {
     throw Object.assign(new Error('That deposit method is not configured.'), { status: 400 });
+  }
+  if (amount && decimalToMinorUnits(amount) < decimalToMinorUnits(minimumDeposit)) {
+    throw Object.assign(
+      new Error(`Minimum deposit is ${minimumDeposit} BIRR / ዝቅተኛው የማስቀመጫ መጠን ${minimumDeposit} ብር ነው።`),
+      { status: 400, code: 'MINIMUM_DEPOSIT_20_BIRR' },
+    );
   }
   if (!amount || providerReference.length < 3 || providerReference.length > 128 ||
       /[\u0000-\u001f\u007f]/.test(providerReference)) {
@@ -1972,6 +1985,13 @@ async function handleUserFlow(message, user, lang) {
     const amount = validDepositAmount(input);
     if (!amount) {
       await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].invalidAmount });
+      return true;
+    }
+    if (decimalToMinorUnits(amount) < decimalToMinorUnits(minimumDeposit)) {
+      await telegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `❌ Minimum deposit is ${minimumDeposit} BIRR. Please enter ${minimumDeposit} or more.\n\nዝቅተኛው የማስቀመጫ መጠን ${minimumDeposit} ብር ነው። እባክዎ ${minimumDeposit} ወይም ከዚያ በላይ ያስገቡ።`,
+      });
       return true;
     }
     await setUserFlow(user.id, 'deposit', 'reference', { method: flow.data.method, amount });
@@ -3612,6 +3632,30 @@ app.get('/api/profile', authenticatedTelegramUser, async (req, res, next) => {
   }
 });
 
+app.get('/api/games/recent-winners', authenticatedTelegramUser, async (_req, res, next) => {
+  try {
+    await initializeSchema();
+    const [rows] = await pool.execute(
+      `SELECT gw.room_id, gw.cartela_number, gw.prize, u.first_name, u.username
+       FROM game_winners gw
+       JOIN users u ON u.telegram_id = gw.telegram_id
+       ORDER BY gw.id DESC
+       LIMIT 5`,
+    );
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      winners: rows.map((row) => ({
+        name: row.first_name || row.username || 'Player',
+        cartelaNumber: Number(row.cartela_number),
+        gameId: String(row.room_id),
+        prize: String(Math.round(Number(row.prize))),
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
   try {
     await initializeSchema();
@@ -3932,25 +3976,11 @@ app.post('/telegram/webhook', async (req, res, next) => {
             reply_markup: keyboardFor(lang),
           });
         } else if (supportTopic) {
-          const topic = supportTopic[1];
-          const topicText = {
-            deposits: 'Deposit help: check payment instructions and submit the transaction reference. Pending requests require admin approval.',
-            withdrawals: `Withdrawal help: minimum ${config.withdrawalMinimum} BIRR, no fee. Pending requests reserve funds until reviewed.`,
-            wallet: 'Wallet help: use 💰 Balance to refresh the TiDB-backed balance. Contact support if a transaction is missing.',
-            cartela: 'Cartela selection is not available until the persistent room and game service is implemented.',
-            rules: 'Bingo rooms and game rules are not available yet; no games or prizes are currently offered.',
-            technical: 'Technical help: describe the issue and include your Telegram username. Never send passwords, bot tokens, or payment PINs.',
-          }[topic];
-          const contactUrl = config.supportUrl ||
-            (config.supportUsername ? `https://t.me/${config.supportUsername}` : '');
-          const contact = config.supportUsername ? `\n\nContact @${config.supportUsername}.` : '';
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
           await telegramApi('sendMessage', {
             chat_id: callback.message.chat.id,
-            text: topicText + contact,
-            ...(contactUrl ? {
-              reply_markup: { inline_keyboard: [[{ text: 'Contact support', url: contactUrl }]] },
-            } : {}),
+            text: supportCenterText(),
+            reply_markup: supportKeyboard(),
           });
         } else if (data === 'channel:verify') {
           const membership = await channelMembership(user.id);
@@ -4163,18 +4193,9 @@ app.post('/telegram/webhook', async (req, res, next) => {
     } else if (menuAction === 'support') {
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,
-        text: t.supportPrompt,
-        reply_markup: supportKeyboard(lang),
+        text: supportCenterText(),
+        reply_markup: supportKeyboard(),
       });
-      const contactUrl = config.supportUrl ||
-        (config.supportUsername ? `https://t.me/${config.supportUsername}` : '');
-      if (contactUrl) {
-        await telegramApi('sendMessage', {
-          chat_id: message.chat.id,
-          text: t.supportInfo,
-          reply_markup: { inline_keyboard: [[{ text: 'Contact support', url: contactUrl }]] },
-        });
-      }
     } else if (menuAction === 'channel') {
       await telegramApi('sendMessage', {
         chat_id: message.chat.id,

@@ -170,6 +170,10 @@ const words = {
     howToPlay: 'HOW TO PLAY', pickRoom: 'Pick a room', chooseCards: 'Choose cards', autoMarkWin: 'Auto-mark & win',
     round: 'ROUND', pot: 'POT', called: 'CALLED', currentBall: 'CURRENT BALL', watchingLive: 'Watching live',
     callsSynced: 'Calls are synchronized for everyone.', auto: 'Auto', sound: 'Sound',
+    watchingOnly: 'WATCHING ONLY', watchingOnlySub: 'This round has already begun — wait here for the next.',
+    recentActivity: 'RECENT ACTIVITY', noRecentGames: 'No recent games yet.',
+    activityFooter: 'Live results — updates as rounds settle',
+    recentWinnerInfo: 'Cartela #{cartelaNumber} won · Game #{gameId}',
     bingo: '📣 BINGO!', claimingBingo: 'Verifying…', marked: 'MARKED',
     roomMetrics: 'Room metrics', cartelaSelection: 'Choose a cartela', selectedCartelas: 'Selected cartela previews',
     cartela: 'Cartela', startingIn: 'STARTS IN',
@@ -190,6 +194,8 @@ const words = {
     successfulReferrals: 'Successful referrals:',
     availableBalance: 'Available play balance', bonusBalance: 'Referral bonus · play only',
     withdrawableBalance: 'Withdrawable balance', bonusExplainer: 'Referral bonus can be used to play, but cannot be withdrawn directly.',
+    minimumDeposit: 'Minimum deposit is 20.00 BIRR.',
+    minimumDepositError: 'Minimum deposit is 20 BIRR / ዝቅተኛው የማስቀመጫ መጠን 20 ብር ነው።',
     paymentMethod: 'Payment method', amountBirr: 'Amount (BIRR)',
     transactionReference: 'Transaction reference', submitApproval: 'Submit for approval',
     paymentUnconfigured: 'Payment methods are not configured.',
@@ -233,6 +239,10 @@ const words = {
     howToPlay: 'እንዴት መጫወት ይቻላል', pickRoom: 'ክፍል ይምረጡ', chooseCards: 'ካርዶችን ይምረጡ', autoMarkWin: 'በራስ-ሰር ምልክት እና አሸንፍ',
     round: 'ዙር', pot: 'ሽልማት', called: 'የተጠሩ', currentBall: 'አሁን የወጣ ቁጥር', watchingLive: 'በቀጥታ እየተመለከቱ ነው',
     callsSynced: 'ጥሪዎቹ ለሁሉም ተጫዋቾች ተመሳስለዋል።', auto: 'በራስ-ሰር', sound: 'ድምፅ',
+    watchingOnly: 'ተመልካች ብቻ', watchingOnlySub: 'ይህ ዙር ተጀምሯል — ለሚቀጥለው ዙር እዚህ ይጠብቁ።',
+    recentActivity: 'የቅርብ ጊዜ እንቅስቃሴ', noRecentGames: 'በቅርቡ የተጠናቀቁ ጨዋታዎች የሉም።',
+    activityFooter: 'የቀጥታ ውጤቶች — ዙሮች ሲጠናቀቁ ይዘምናሉ',
+    recentWinnerInfo: 'ካርቴላ #{cartelaNumber} አሸንፏል · ጨዋታ #{gameId}',
     bingo: '📣 ቢንጎ!', claimingBingo: 'በማረጋገጥ ላይ…', marked: 'ምልክት የተደረገባቸው',
     roomMetrics: 'የክፍል መረጃ', cartelaSelection: 'ካርቴላ ይምረጡ', selectedCartelas: 'የተመረጡ ካርቴላዎች',
     cartela: 'ካርቴላ', startingIn: 'ይጀምራል በ',
@@ -253,6 +263,8 @@ const words = {
     inviteCopied: 'የግብዣ አገናኙ ተቀድቷል።', successfulReferrals: 'የተሳኩ ግብዣዎች:',
     availableBalance: 'ለመጫወት ያለው ቀሪ ሂሳብ', bonusBalance: 'የግብዣ ጉርሻ · ለጨዋታ ብቻ',
     withdrawableBalance: 'ማውጣት የሚቻለው ቀሪ ሂሳብ', bonusExplainer: 'የግብዣ ጉርሻውን ለመጫወት መጠቀም ይቻላል፤ በቀጥታ ማውጣት ግን አይቻልም።',
+    minimumDeposit: 'ዝቅተኛው ተቀማጭ 20.00 ብር ነው።',
+    minimumDepositError: 'ዝቅተኛው የማስቀመጫ መጠን 20 ብር ነው።',
     paymentMethod: 'የክፍያ ዘዴ', amountBirr: 'መጠን (ብር)',
     transactionReference: 'የግብይት ማጣቀሻ', submitApproval: 'ለማጽደቅ አስገባ',
     paymentUnconfigured: 'የክፍያ ዘዴዎች አልተዋቀሩም።',
@@ -1020,7 +1032,7 @@ function App() {
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
       {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
-      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
+      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
       {view === 'winner' && <WinnerScreen
         game={game}
         room={room}
@@ -1322,9 +1334,10 @@ function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh
   </>;
 }
 
-function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefresh, onBingo }) {
+function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave, onRefresh, onBingo }) {
   const [autoMark, setAutoMark] = useState(true);
   const [isClaiming, setIsClaiming] = useState(false);
+  const [recentWinners, setRecentWinners] = useState([]);
   const claimInFlight = useRef(false);
   const [soundEnabled, setSoundEnabled] = useState(() => {
     try { return window.localStorage.getItem('shisho_sound') !== 'false'; }
@@ -1364,6 +1377,32 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
     [myCards, displayedCalledSet],
   );
   const isSpectator = !myCards.length;
+  useEffect(() => {
+    if (!isSpectator) {
+      setRecentWinners([]);
+      return undefined;
+    }
+    let active = true;
+    let inFlight = false;
+    const loadRecentWinners = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const data = await request('/api/games/recent-winners');
+        if (active && Array.isArray(data.winners)) setRecentWinners(data.winners);
+      } catch (error) {
+        if (active) console.warn('[Recent winners refresh failed]:', error.message);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void loadRecentWinners();
+    const timer = window.setInterval(loadRecentWinners, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isSpectator, request, room?.id]);
   const previousCall = useRef(null);
   useEffect(() => {
     if (!soundEnabled || currentNumber === null || callsAreFrozen || previousCall.current === currentNumber) {
@@ -1501,7 +1540,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
           }))}
         </div>
       </section>
-      <section className="live-right-column">
+      <section className={`live-right-column ${isSpectator ? 'spectator' : ''}`}>
         <div className="live-call-strip" aria-live="polite">
           <div className="live-current-call"><small>{t.currentBall}</small>
             <strong key={currentNumber ?? 'waiting'}>{currentNumber === null ? '—' : bingoLabel(currentNumber)}</strong>
@@ -1510,7 +1549,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
             <span className="recent-ball">{previousNumber === null ? '—' : bingoLabel(previousNumber)}</span>
           </div>
         </div>
-        <div className="live-controls">
+        {!isSpectator && <div className="live-controls">
           <button className={`auto-toggle ${autoMark ? 'enabled' : ''}`} aria-pressed={autoMark} onClick={toggleAutoMark}>
             <span>{t.auto}</span><i><b /></i>
           </button>
@@ -1524,9 +1563,29 @@ function GameScreen({ room, game, t, calledSet, audioRef, busy, onLeave, onRefre
           }}>
             {soundEnabled ? '🔊' : '🔇'} {t.sound}
           </button>
-        </div>
+        </div>}
         {isSpectator
-          ? <div className="live-spectator-card"><span>👁</span><strong>{t.watchingLive}</strong><small>{t.callsSynced}</small></div>
+          ? <div className="watching-only-container">
+            <div className="watching-badge"><span>👀</span><strong>{t.watchingOnly}</strong></div>
+            <p className="watching-subtitle">{t.watchingOnlySub}</p>
+            <section className="recent-activity-section">
+              <div className="activity-title">{t.recentActivity}</div>
+              <div className="activity-list">
+                {recentWinners.length === 0
+                  ? <div className="activity-empty">{t.noRecentGames}</div>
+                  : recentWinners.map((item, index) => <article className="activity-card" key={`${item.gameId}-${item.cartelaNumber}-${index}`}>
+                    <div className="activity-card-left">
+                      <div className="activity-winner-name">{item.name || t.playerFallback}</div>
+                      <div className="activity-game-info">{t.recentWinnerInfo
+                        .replace('{cartelaNumber}', item.cartelaNumber)
+                        .replace('{gameId}', item.gameId)}</div>
+                    </div>
+                    <div className="activity-prize">{item.prize} {t.currency}</div>
+                  </article>)}
+              </div>
+              <div className="activity-footer">{t.activityFooter}</div>
+            </section>
+          </div>
           : <div className="cartelas-stack">
             {myCards.map((card) => <article className="live-cartela-card" key={card.number}>
               <div className="mini-card-title"><span>#{card.number}</span><small>{card.progress || 0}% {t.marked}</small></div>
@@ -1794,6 +1853,12 @@ function WalletScreen({ wallet, walletDetails, t, onRefresh, onError }) {
   const current = methods.find((item) => item.method === method);
   async function submit(event) {
     event.preventDefault();
+    const depositAmount = Number(amount);
+    if (!Number.isFinite(depositAmount) || depositAmount < 20) {
+      setStatus(t.minimumDepositError);
+      telegramWebApp()?.showAlert?.(t.minimumDepositError);
+      return;
+    }
     setBusy(true);
     setStatus('');
     try {
@@ -1851,7 +1916,7 @@ function WalletScreen({ wallet, walletDetails, t, onRefresh, onError }) {
     <section className="panel wallet-panel"><h2>{t.deposit}</h2>{methods.length ? <form onSubmit={submit}>
       <label>{t.paymentMethod}<select value={method} onChange={(event) => setMethod(event.target.value)}>{methods.map((item) => <option key={item.method} value={item.method}>{item.label}</option>)}</select></label>
       {current && <p className="payment-details">{current.label} · {current.accountName} · {current.account}</p>}
-      <label>{t.amountBirr}<input required inputMode="decimal" value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
+      <label>{t.amountBirr}<input required type="number" inputMode="decimal" min="20" step="0.01" placeholder={t.minimumDeposit} value={amount} onChange={(event) => setAmount(event.target.value)} /></label>
       <label>{t.transactionReference}<input required maxLength="128" value={reference} onChange={(event) => setReference(event.target.value)} /></label>
       <button className="primary-button" disabled={busy}>{busy ? t.loading : t.submitApproval}</button>
       {status && <p className="muted">{status}</p>}
@@ -2206,6 +2271,18 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .live-cartela-card .cartela-cell.invalid-click{animation:shake .3s ease;border-color:#ef4444;background:#7f1d1d}
 @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-3px)}75%{transform:translateX(3px)}}
 .live-spectator-card{display:grid;align-content:center;justify-items:center;flex:1;gap:7px;border:1px solid #342451;border-radius:10px;background:#160c2e;text-align:center}.live-spectator-card>span{font-size:22px}.live-spectator-card>strong{font-size:11px}.live-spectator-card>small{padding:0 8px;color:#aa9bbd;font-size:8px}
+.live-right-column.spectator{grid-template-rows:auto minmax(0,1fr)}
+.watching-only-container{display:flex;min-height:0;flex-direction:column;gap:5px;overflow-y:auto;padding:7px;border:1px solid #342451;border-radius:10px;background:#160c2e}
+.watching-badge{display:flex;align-items:center;gap:5px;color:#f59e0b;font-size:clamp(9px,2.7vw,14px);font-weight:900;letter-spacing:.04em}
+.watching-badge>span{font-size:15px}.watching-subtitle{margin:0 0 3px;color:#b9aec9;font-size:clamp(8px,2.2vw,11px);line-height:1.3}
+.recent-activity-section{display:flex;min-height:0;flex-direction:column;gap:5px}
+.activity-title{color:#d97706;font-size:8px;font-weight:900;letter-spacing:.08em}
+.activity-list{display:grid;min-height:0;gap:4px;overflow-y:auto}
+.activity-card{display:flex;align-items:center;justify-content:space-between;gap:4px;padding:6px;border:1px solid #2f1958;border-radius:7px;background:#190e32}
+.activity-card-left{min-width:0}.activity-winner-name{overflow:hidden;color:#fbbf24;font-size:clamp(8px,2.2vw,11px);font-weight:800;text-overflow:ellipsis;white-space:nowrap}
+.activity-game-info{margin-top:2px;color:#9ca3af;font-size:clamp(6px,1.8vw,8px);line-height:1.2}
+.activity-prize{flex:none;color:#f59e0b;font-size:clamp(9px,2.4vw,13px);font-weight:900;white-space:nowrap}
+.activity-empty,.activity-footer{color:#8f829e;font-size:7px;line-height:1.3}.activity-footer{margin-top:1px}
 .btn-bingo{width:100%;min-height:42px;border:1px solid #392d51;border-radius:12px;background:#1c142e;color:#55466d;font-size:14px;font-weight:950;cursor:not-allowed;transition:all .2s}
 .btn-bingo.active-yellow{border-color:#f7c633;background:linear-gradient(90deg,#f59e0b,#eab308);color:#000;cursor:pointer;box-shadow:0 0 14px #f59e0b99;animation:pulse-glow 1.2s infinite alternate}
 .btn-bingo:disabled{opacity:1}
