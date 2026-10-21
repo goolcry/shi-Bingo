@@ -4271,6 +4271,8 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
       message: 'ቢንጎ ተብሏል! / Bingo claimed!',
       winners,
       calledNumbers,
+      frozenBallCount: calledNumbers.length,
+      lastBall: calledNumbers.at(-1) ?? null,
       claimDeadline,
       winnerAnnouncementAtMs,
       totalPot: formatAmount(room.prize_pool),

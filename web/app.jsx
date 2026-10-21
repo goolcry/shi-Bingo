@@ -417,6 +417,7 @@ function App() {
   const roomSessionRevision = useRef(0);
   const latestRoomServerTime = useRef(0);
   const finishedRoomId = useRef(null);
+  const frozenGameRoomId = useRef(null);
   const claimRequestInFlight = useRef(false);
   const selectionMutationQueue = useRef(Promise.resolve());
   const roomJoinRequest = useRef(null);
@@ -949,6 +950,7 @@ function App() {
     let active = true;
     let timer = null;
     let inFlight = false;
+    const roomId = String(room.id);
     const update = async () => {
       if (!active || inFlight) return;
       inFlight = true;
@@ -958,16 +960,24 @@ function App() {
         const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/state`);
         const responseReceivedAt = Date.now();
         if (!active || revision !== roomStateRevision.current) return;
+        if (frozenGameRoomId.current === roomId
+          && !['VERIFYING', 'FINISHED'].includes(data.room.status)) return;
         const snapshotServerTime = Number(data.room.serverNow);
         if (Number.isFinite(snapshotServerTime) && snapshotServerTime < latestRoomServerTime.current) return;
         if (Number.isFinite(snapshotServerTime)) latestRoomServerTime.current = snapshotServerTime;
-        const roomId = String(room.id);
         const isFinishedStatus = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
         const callIndex = Number(data.game?.callIndex) || 0;
         const hasWinners = (data.winners?.length || 0) > 0 || (data.game?.winners?.length || 0) > 0;
         const isFinished = isFinishedStatus && (hasWinners || callIndex >= 75);
         const hasPendingWinner = data.room.status === 'VERIFYING'
           && (data.winners?.length || data.game?.winners?.length);
+        if (['VERIFYING', 'FINISHED'].includes(data.room.status)) {
+          frozenGameRoomId.current = roomId;
+          const audio = callAudioRef.current;
+          audio?.pause();
+          if (audio) audio.currentTime = 0;
+          window.speechSynthesis?.cancel();
+        }
         const shouldShowWinner = isFinished || Boolean(hasPendingWinner);
         if (claimRequestInFlight.current && !shouldShowWinner) return;
         if (finishedRoomId.current === roomId && !isFinished) return;
@@ -1025,6 +1035,15 @@ function App() {
       if (!active || String(roomId) !== String(room.id)) return;
       const eventReceivedAt = Date.now();
       const status = data.status || (data.type === 'WINNER_ANNOUNCED' ? 'FINISHED' : null);
+      if (data.type === 'GAME_HALTED' || ['VERIFYING', 'FINISHED'].includes(status)) {
+        frozenGameRoomId.current = roomId;
+        const audio = callAudioRef.current;
+        audio?.pause();
+        if (audio) audio.currentTime = 0;
+        window.speechSynthesis?.cancel();
+      } else if (frozenGameRoomId.current === roomId && status === 'PLAYING') {
+        return;
+      }
       const calledNumbers = Array.isArray(data.calledNumbers)
         ? parseNumberList(data.calledNumbers)
         : null;
@@ -1043,7 +1062,9 @@ function App() {
 
       setGame((current) => {
         const existingCalls = parseNumberList(current?.calledNumbers);
-        const nextCalls = calledNumbers && (calledNumbers.length >= existingCalls.length || isFinished)
+        const nextCalls = calledNumbers && (
+          data.type === 'GAME_HALTED' || calledNumbers.length >= existingCalls.length || isFinished
+        )
           ? calledNumbers
           : existingCalls;
         return {
@@ -1187,6 +1208,8 @@ function App() {
     roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
     finishedRoomId.current = null;
+    frozenGameRoomId.current = null;
+    pendingCartelaToggles.current.clear();
     setRoom(null);
     setRoomReady(false);
     setGame(null);
@@ -1198,6 +1221,8 @@ function App() {
   function resetRoomState({ keepCurrentView = false } = {}) {
     roomSessionRevision.current += 1;
     roomStateRevision.current += 1;
+    frozenGameRoomId.current = null;
+    pendingCartelaToggles.current.clear();
     if (!keepCurrentView) {
       setRoom(null);
       setRoomReady(false);
@@ -1437,7 +1462,7 @@ function App() {
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
       {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onNotify={notify} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
-      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} onNotify={notify} /></ErrorBoundary>}
+      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} frozenGameRoomId={frozenGameRoomId} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} onNotify={notify} /></ErrorBoundary>}
       {view === 'winner' && <WinnerScreen
         game={game}
         room={room}
@@ -1758,7 +1783,7 @@ function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh
   </>;
 }
 
-function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave, onRefresh, onBingo, onNotify }) {
+function GameScreen({ room, game, t, calledSet, audioRef, frozenGameRoomId, request, busy, onLeave, onRefresh, onBingo, onNotify }) {
   const [autoMark, setAutoMark] = useState(true);
   const [isClaiming, setIsClaiming] = useState(false);
   const [recentWinners, setRecentWinners] = useState([]);
@@ -1783,7 +1808,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
     : String(game?.drawOrder || '');
   const drawOrder = useMemo(() => parseNumberList(game?.drawOrder), [drawOrderKey]);
   const calledNumbers = useMemo(() => parseNumberList(game?.calledNumbers), [game?.calledNumbers]);
-  const callsAreFrozen = room?.status !== 'PLAYING' || game?.status === 'FINISHED' || claimPaused || isClaiming;
+  const callsAreFrozen = frozenGameRoomId.current === roomId
+    || room?.status !== 'PLAYING' || game?.status === 'FINISHED' || claimPaused || isClaiming;
   const callIntervalMs = Math.max(1000, Number(game?.callIntervalMs) || 4000);
   const clientClockOffset = Number(game?.clientClockOffset) || 0;
   const [clockCallState, setClockCallState] = useState({ roomId: '', numbers: [] });
@@ -1804,6 +1830,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
     }
 
     const updateClockCalls = () => {
+      if (frozenGameRoomId.current === roomId) return;
       const elapsedMs = Math.max(0, Date.now() + clientClockOffset - startTimeMs);
       const dueCount = Math.min(drawOrder.length, Math.floor(elapsedMs / callIntervalMs));
       const targetCount = Math.max(calledNumbers.length, dueCount);
@@ -1878,14 +1905,15 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
   }, [isSpectator, request, room?.id]);
   const previousCall = useRef(null);
   useEffect(() => {
-    if (!soundEnabled || currentNumber === null || callsAreFrozen || previousCall.current === currentNumber) {
+    if (frozenGameRoomId.current === roomId || !soundEnabled || currentNumber === null
+      || callsAreFrozen || previousCall.current === currentNumber) {
       previousCall.current = currentNumber;
       return undefined;
     }
     let active = true;
     let speechFallbackStarted = false;
     const speakFallback = () => {
-      if (!active || !soundEnabled || speechFallbackStarted) return;
+      if (!active || frozenGameRoomId.current === roomId || !soundEnabled || speechFallbackStarted) return;
       speechFallbackStarted = true;
       try {
         if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
