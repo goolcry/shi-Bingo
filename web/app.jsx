@@ -707,6 +707,27 @@ function App() {
     const applyEvent = (data) => {
       if (String(roomId) !== String(room.id)) return;
       if (data.type === 'GAME_STARTED') {
+        const startTimeMs = Number(data.startTimeMs);
+        setRoom((current) => current && String(current.id) === roomId
+          ? {
+            ...current,
+            status: 'PLAYING',
+            startedAt: Number.isFinite(startTimeMs) ? startTimeMs : current.startedAt,
+            startTimeMs: Number.isFinite(startTimeMs) ? startTimeMs : current.startTimeMs,
+          }
+          : current);
+        setGame((current) => ({
+          ...(current || {}),
+          status: 'PLAYING',
+          calledNumbers: [],
+          currentNumber: null,
+          callIndex: 0,
+          startedAt: Number.isFinite(startTimeMs) ? startTimeMs : current?.startedAt,
+          startTimeMs: Number.isFinite(startTimeMs) ? startTimeMs : current?.startTimeMs,
+          drawOrder: Array.isArray(data.drawOrder) ? data.drawOrder.map(Number) : current?.drawOrder,
+          serverNow: Number(data.serverTime) || current?.serverNow,
+        }));
+        setView('game');
         loadRoom(roomId).catch((error) => console.warn('[Game start state refresh failed]:', error));
         return;
       }
@@ -979,8 +1000,10 @@ function App() {
       const winners = Array.isArray(data.winners) ? data.winners : null;
       const announcementAt = Number(data.winnerAnnouncementAtMs);
       const isClaim = data.type === 'CLAIMS_UPDATED';
+      const isGameStarted = data.type === 'GAME_STARTED';
       const isFinished = data.type === 'WINNER_ANNOUNCED' || status === 'FINISHED';
       const shouldShowWinner = isClaim || isFinished || (status === 'VERIFYING' && winners?.length);
+      const startTimeMs = Number(data.startTimeMs ?? data.startedAt);
 
       setGame((current) => {
         const existingCalls = parseNumberList(current?.calledNumbers);
@@ -993,6 +1016,12 @@ function App() {
           calledNumbers: nextCalls,
           currentNumber: nextCalls.at(-1) ?? null,
           callIndex: nextCalls.length,
+          drawOrder: Array.isArray(data.drawOrder) ? data.drawOrder.map(Number) : current?.drawOrder,
+          startedAt: Number.isFinite(startTimeMs) && startTimeMs > 0
+            ? startTimeMs : current?.startedAt,
+          startTimeMs: Number.isFinite(startTimeMs) && startTimeMs > 0
+            ? startTimeMs : current?.startTimeMs,
+          serverNow: Number(data.serverTime) || current?.serverNow,
           winners: winners || current?.winners || [],
           winnerAnnouncementAtMs: Number.isFinite(announcementAt) && announcementAt > 0
             ? announcementAt
@@ -1005,6 +1034,10 @@ function App() {
         return {
           ...current,
           status: status || current.status,
+          startedAt: Number.isFinite(startTimeMs) && startTimeMs > 0
+            ? startTimeMs : current.startedAt,
+          startTimeMs: Number.isFinite(startTimeMs) && startTimeMs > 0
+            ? startTimeMs : current.startTimeMs,
           pot: data.netPot ?? current.pot,
           prizePool: data.totalPot ?? current.prizePool,
           finishedAt: Number(data.finishedAt) || current.finishedAt,
@@ -1022,7 +1055,7 @@ function App() {
         setPendingBingoClaim(null);
       }
       if (shouldShowWinner) setView('winner');
-      else if (status === 'PLAYING' && data.type !== 'GAME_SNAPSHOT') setView('game');
+      else if (isGameStarted || (status === 'PLAYING' && data.type !== 'GAME_SNAPSHOT')) setView('game');
     };
     const connect = async () => {
       controller = new AbortController();
@@ -1802,7 +1835,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
     if (autoMark) {
       setManualMarks(Object.fromEntries(myCards.map((card) => [
         card.number,
-        (card.numbers || []).filter((value) => value !== 'FREE' && displayedCalledSet.has(Number(value))).map(Number),
+        (card.numbers || []).filter((value, index) => !isFreeCell(value, index)
+          && displayedCalledSet.has(Number(value))).map(Number),
       ])));
       setAutoMark(false);
       return;
@@ -1810,7 +1844,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
     setAutoMark(true);
   };
   const handleManualMark = (card, value, cellIndex) => {
-    if (value === 'FREE') return;
+    if (isFreeCell(value, cellIndex)) return;
     const number = Number(value);
     const key = `${card.number}:${cellIndex}`;
     if (!displayedCalledSet.has(number)) {
@@ -1960,17 +1994,24 @@ function CardNumbers({ numbers, cardNumber, t, calledSet, interactive = false, i
     {values.map((value, index) => <button
       type="button"
       key={index}
-      className={`cartela-cell ${value === 'FREE' ? 'free' : ''} ${value === 'FREE' || calledSet.has(Number(value)) ? 'marked' : ''} ${markedPattern?.has(index) ? 'win-cell' : ''} ${invalidCells?.[`${cardNumber}:${index}`] ? 'invalid-click' : ''}`}
-      disabled={!interactive || value == null || value === 'FREE'}
-      aria-label={value === 'FREE' ? t.freeSpaceLabel : `${t.cartelaCellNumber.replace('{number}', value)}${calledSet.has(Number(value)) ? `, ${t.markedCell}` : ''}`}
+      className={`cartela-cell ${isFreeCell(value, index) ? 'free' : ''} ${isFreeCell(value, index) || calledSet.has(Number(value)) ? 'marked' : ''} ${markedPattern?.has(index) ? 'win-cell' : ''} ${invalidCells?.[`${cardNumber}:${index}`] ? 'invalid-click' : ''}`}
+      disabled={!interactive || value == null || isFreeCell(value, index)}
+      aria-label={isFreeCell(value, index) ? t.freeSpaceLabel : `${t.cartelaCellNumber.replace('{number}', value)}${calledSet.has(Number(value)) ? `, ${t.markedCell}` : ''}`}
       onClick={() => onManualMark?.(value, index)}
-    >{value === 'FREE' ? '★' : value ?? '—'}</button>)}
+    >{isFreeCell(value, index) ? '★' : value ?? '—'}</button>)}
   </div>;
+}
+
+function isFreeCell(value, index) {
+  return index === 12 || value === 'FREE' || value === '★' || value === '*';
 }
 
 function winningPatternForCard(numbers = [], calledSet = new Set()) {
   if (!Array.isArray(numbers) || numbers.length !== 25) return null;
-  const marked = numbers.map((value) => value === 'FREE' || calledSet.has(Number(value)));
+  const normalizedCalled = new Set(Array.from(calledSet, Number));
+  const marked = numbers.map((value, index) => (
+    isFreeCell(value, index) || Number(value) === 0 || normalizedCalled.has(Number(value))
+  ));
   for (let row = 0; row < 5; row += 1) {
     const indexes = Array.from({ length: 5 }, (_, column) => row * 5 + column);
     if (indexes.every((index) => marked[index])) return new Set(indexes);
