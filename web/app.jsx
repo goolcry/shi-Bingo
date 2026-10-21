@@ -231,6 +231,14 @@ const words = {
     roomsLoadHelp: 'New rooms will appear here when opened.',
     claimVerified: '✓ Verified', roomStatusWaiting: 'WAITING', roomStatusSelecting: 'SELECTING',
     roomStatusPlaying: 'PLAYING', languageSaved: 'Language updated.',
+    ranksSubtitle: 'Ranked by cartelas played', thisWeek: 'This week', thisMonth: 'This month',
+    gamesPlayedLabel: 'Games played', rankEmpty: 'No games recorded for this period yet.',
+    historyTitle: 'Transactions & game history', historySubtitle: 'Your latest account activity',
+    gameEntryTitle: 'Game entry', gameRefundTitle: 'Game refund', gameWinTitle: 'Bingo win',
+    depositTitle: 'Deposit', withdrawalTitle: 'Withdrawal', referralBonusTitle: 'Referral bonus',
+    registrationBonusTitle: 'Welcome bonus', adjustmentTitle: 'Balance adjustment',
+    completedStatus: 'Completed', historyLoadFailed: 'Could not load your history.',
+    ranksLoadFailed: 'Could not load the leaderboard.',
   },
   am: {
     play: 'ጨዋታ', ranks: 'ደረጃ', history: 'ታሪክ', profile: 'መገለጫ', settings: 'ቅንብሮች', welcome: 'ይጫወቱ። ያሸንፉ። ይደሰቱ!',
@@ -301,6 +309,14 @@ const words = {
     roomsLoadHelp: 'አዳዲስ ክፍሎች ሲከፈቱ እዚህ ይታያሉ።', refreshRoom: 'ክፍሉን አድስ',
     claimVerified: '✓ ተረጋግጧል', roomStatusWaiting: 'በመጠባበቅ ላይ',
     roomStatusSelecting: 'በምርጫ ላይ', roomStatusPlaying: 'በጨዋታ ላይ', languageSaved: 'ቋንቋው ተቀይሯል።',
+    ranksSubtitle: 'በተጫወቱት ካርቴላዎች መሠረት', thisWeek: 'የዚህ ሳምንት', thisMonth: 'የዚህ ወር',
+    gamesPlayedLabel: 'የተጫወቱ ጨዋታዎች', rankEmpty: 'በዚህ ወቅት የተመዘገበ ጨዋታ የለም።',
+    historyTitle: 'የግብይት እና የጨዋታ ታሪክ', historySubtitle: 'የቅርብ ጊዜ እንቅስቃሴዎች',
+    gameEntryTitle: 'የጨዋታ መግቢያ', gameRefundTitle: 'የጨዋታ ተመላሽ', gameWinTitle: 'የቢንጎ ድል',
+    depositTitle: 'ተቀማጭ', withdrawalTitle: 'ማውጣት', referralBonusTitle: 'የግብዣ ጉርሻ',
+    registrationBonusTitle: 'የእንኳን ደህና መጡ ጉርሻ', adjustmentTitle: 'የቀሪ ሂሳብ ማስተካከያ',
+    completedStatus: 'ተጠናቋል', historyLoadFailed: 'ታሪክዎን መጫን አልተቻለም።',
+    ranksLoadFailed: 'የደረጃ ሰንጠረዡን መጫን አልተቻለም።',
   },
 };
 
@@ -412,7 +428,10 @@ function App() {
   const lastGameCall = useRef({ roomId: null, number: null, callIndex: 0 });
   const [profile, setProfile] = useState(() => readCachedValue('shisho_cached_profile', {}).profile || null);
   const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [ranks, setRanks] = useState([]);
+  const [ranksLoading, setRanksLoading] = useState(false);
+  const [rankPeriod, setRankPeriod] = useState('weekly');
   const [referral, setReferral] = useState(null);
   const [appInfo, setAppInfo] = useState(null);
   const [error, setError] = useState('');
@@ -1137,20 +1156,26 @@ function App() {
             setAppInfo(info);
           }
         } else if (view === 'history') {
+          setHistoryLoading(true);
           const result = await request('/api/history');
-          if (active) setHistory([...(result.games || []), ...(result.transactions || [])]
-            .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)));
+          if (active) setHistory(result.history || result.transactions || []);
         } else if (view === 'ranks') {
-          const result = await request('/api/ranks');
-          if (active) setRanks(result.ranks || []);
+          setRanksLoading(true);
+          const result = await request(`/api/ranks?period=${encodeURIComponent(rankPeriod)}`);
+          if (active) setRanks(result.top5 || []);
         }
       } catch (reason) {
         if (active) setError(reason.message);
+      } finally {
+        if (active) {
+          if (view === 'history') setHistoryLoading(false);
+          if (view === 'ranks') setRanksLoading(false);
+        }
       }
     };
     load();
     return () => { active = false; };
-  }, [view, request]);
+  }, [view, request, rankPeriod]);
 
   const go = (next) => {
     setError('');
@@ -1421,8 +1446,14 @@ function App() {
         pendingWinner={pendingBingoClaim}
         onNextRound={advanceToNextRound}
       />}
-      {view === 'ranks' && <RanksScreen ranks={ranks} t={t} userId={user?.id} />}
-      {view === 'history' && <HistoryScreen history={history} t={t} />}
+      {view === 'ranks' && <RanksScreen
+        ranks={ranks}
+        loading={ranksLoading}
+        period={rankPeriod}
+        onPeriodChange={setRankPeriod}
+        t={t}
+      />}
+      {view === 'history' && <HistoryScreen history={history} loading={historyLoading} t={t} />}
       {view === 'profile' && <ProfileScreen profile={profile} user={user} wallet={wallet} t={t} onLanguage={saveLanguage} busy={busy} referral={referral} appInfo={appInfo} onWallet={() => go('wallet')} onHistory={() => go('history')} onRanks={() => go('ranks')} onRefresh={async () => {
         try {
           await refreshWallet();
@@ -2199,22 +2230,108 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
   </div>;
 }
 
-function RanksScreen({ ranks, t, userId }) {
-  return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">🏆 {t.ranks}</h1>
-    {ranks.length ? <div className="panel rank-list">{ranks.map((rank, i) => <div className="rank-row" key={rank.userId || i}>
-      <span className="rank-position">{rank.rank || i + 1}</span><strong>{rank.displayName}{rank.userId === userId ? ` ${t.you}` : ''}</strong><span>{rank.gamesWon} {t.wins}</span><b>{money(rank.winnings)} {t.currency}</b>
-    </div>)}</div> : <div className="empty panel"><span className="empty-icon">👑</span><strong>{t.noRanks}</strong></div>}
-  </>;
+function RanksScreen({ ranks, loading, period, onPeriodChange, t }) {
+  const medals = ['🥇', '🥈', '🥉'];
+  return <section className="ranks-page-container">
+    <header className="ranks-hero-header">
+      <span className="ranks-hero-icon" aria-hidden="true">🏆</span>
+      <h1 className="ranks-title">{t.ranks}</h1>
+      <p className="ranks-subtitle">{t.ranksSubtitle}</p>
+      <div className="ranks-tab-segmented" role="tablist" aria-label={t.ranks}>
+        <button type="button" role="tab" aria-selected={period === 'weekly'}
+          className={`ranks-tab-btn ${period === 'weekly' ? 'active' : ''}`}
+          onClick={() => onPeriodChange('weekly')}>📅 {t.thisWeek}</button>
+        <button type="button" role="tab" aria-selected={period === 'monthly'}
+          className={`ranks-tab-btn ${period === 'monthly' ? 'active' : ''}`}
+          onClick={() => onPeriodChange('monthly')}>🗓 {t.thisMonth}</button>
+      </div>
+    </header>
+    <div className="ranks-card-list" aria-live="polite">
+      {loading
+        ? [1, 2, 3, 4, 5].map((index) => <div key={index} className="ranks-card-skeleton" />)
+        : ranks.length
+          ? ranks.map((item, index) => {
+            const rank = Number(item.rank) || index + 1;
+            const className = rank <= 3 ? `ranks-${['gold', 'silver', 'bronze'][rank - 1]}` : 'rank-default';
+            return <article className={`ranks-item-card ${className} ${item.isMe ? 'ranks-me-highlight' : ''}`}
+              key={item.userId || index}>
+              <div className="ranks-item-left">
+                <span className="ranks-position-box" aria-hidden="true">
+                  {medals[rank - 1] || <b className="ranks-position-number">{rank}</b>}
+                </span>
+                <div className="ranks-user-info">
+                  <strong className="ranks-user-name">
+                    {item.displayName || t.playerFallback} {item.isMe && <span className="ranks-you-badge">{t.you}</span>}
+                  </strong>
+                  {item.username && <span className="ranks-user-tag">@{item.username}</span>}
+                </div>
+              </div>
+              <div className="ranks-games-count">
+                <b className="games-val">{Number(item.gamesPlayed) || 0}</b>
+                <span className="games-unit">{t.gamesPlayedLabel}</span>
+              </div>
+            </article>;
+          })
+          : <div className="ranks-empty-card"><span aria-hidden="true">🎮</span>{t.rankEmpty}</div>}
+    </div>
+  </section>;
 }
 
-function HistoryScreen({ history, t }) {
-  return <><div className="eyebrow">SHISHO BINGO</div><h1 className="page-title">📜 {t.history}</h1>
-    {history.length ? <div className="history-list">{history.map((item, index) => <article className="panel history-item" key={item.id || index}>
-      <div className="row"><strong>{item.roomId ? t.historyRoom.replace('{id}', item.roomId) : item.type}</strong><span className="status">{item.result || item.status || item.type}</span></div>
-      <p>{item.cartelas ? `${t.cartelasLabel} ${item.cartelas.join(', ')} · ${t.stakeLabelInHistory} ${money(item.stake)} ${t.currency}${item.pattern ? ` · ${t.patternLabel} ${item.pattern}` : ''}` : item.description}</p>
-      <div className="row muted"><span>{item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}</span><b>{item.prize ? `${money(item.prize)} ${t.currency}` : item.amount ? `${money(item.amount)} ${t.currency}` : ''}</b></div>
-    </article>)}</div> : <div className="empty panel"><span className="empty-icon">📜</span><strong>{t.noHistory}</strong></div>}
-  </>;
+function HistoryScreen({ history, loading, t }) {
+  const titles = {
+    GAME_ENTRY: t.gameEntryTitle,
+    GAME_REFUND: t.gameRefundTitle,
+    GAME_WIN: t.gameWinTitle,
+    DEPOSIT: t.depositTitle,
+    WITHDRAWAL: t.withdrawalTitle,
+    REFERRAL_REWARD: t.referralBonusTitle,
+    REFERRAL_BONUS: t.referralBonusTitle,
+    REGISTRATION_BONUS: t.registrationBonusTitle,
+    ADMIN_ADJUSTMENT: t.adjustmentTitle,
+  };
+  const formatDateTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: true,
+    }).format(date);
+  };
+  return <section className="history-page-container">
+    <header className="history-header-block">
+      <span className="history-header-icon" aria-hidden="true">📜</span>
+      <h1 className="history-title">{t.historyTitle}</h1>
+      <p className="history-subtitle">{t.historySubtitle}</p>
+    </header>
+    <div className="history-card-list" aria-live="polite">
+      {loading
+        ? [1, 2, 3, 4].map((index) => <div key={index} className="history-card-skeleton" />)
+        : history.length
+          ? history.map((item, index) => (
+            <article className="history-item-card" key={item.id || index}>
+              <div className="history-item-left">
+                <span className={`history-icon-circle type-${String(item.type || '').toLowerCase()}`} aria-hidden="true">
+                  {item.icon || '💳'}
+                </span>
+                <div className="history-details-col">
+                  <strong className="history-tx-title">{titles[item.type] || t.history}</strong>
+                  {item.details && <span className="history-tx-meta">{item.details}</span>}
+                  <time className="history-tx-time" dateTime={item.createdAt || undefined}>
+                    {formatDateTime(item.createdAt)}
+                  </time>
+                </div>
+              </div>
+              <div className="history-item-right">
+                <b className={`history-tx-amount ${item.direction === 'in' ? 'amount-positive' : 'amount-negative'}`}>
+                  {item.formattedAmount || `${item.direction === 'in' ? '+' : '-'}${money(item.amount)} ${t.currency}`}
+                </b>
+                <span className="history-status-pill">{t.completedStatus}</span>
+              </div>
+            </article>
+          ))
+          : <div className="history-empty-card"><span aria-hidden="true">✨</span>{t.noHistory}</div>}
+    </div>
+  </section>;
 }
 
 function ProfileScreen({ profile, user, wallet, t, onLanguage, busy, referral, appInfo, onWallet, onHistory, onRanks, onRefresh }) {
@@ -2807,6 +2924,48 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .winner-dialog .winner-card-section{flex:none;margin:0 0 4px}
 .winner-dialog .winner-countdown{flex:none;padding:3px 0 2px}
 @media(max-height:620px){.winner-app-shell .winner-dialog{max-height:calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}.winner-dialog .winner-list{max-height:14dvh}.winner-dialog .winner-list>div{min-height:34px}}
+.ranks-page-container,.history-page-container{display:flex;min-height:calc(100dvh - 150px);flex-direction:column;gap:14px;padding:8px 2px 16px}
+.ranks-hero-header,.history-header-block{display:flex;flex-direction:column;align-items:center;text-align:center}
+.ranks-hero-icon,.history-header-icon{font-size:34px;line-height:1.1}
+.ranks-title,.history-title{margin:5px 0 2px;color:#fbd45f;font-size:22px;font-weight:900}
+.ranks-subtitle,.history-subtitle{margin:2px 0 14px;color:#a99bb8;font-size:11px}
+.ranks-tab-segmented{display:flex;width:min(100%,330px);gap:4px;padding:4px;border:1px solid #37234e;border-radius:30px;background:#160d24}
+.ranks-tab-btn{flex:1;min-height:36px;border:0;border-radius:24px;background:transparent;color:#a99bb8;font-size:11px;font-weight:800}
+.ranks-tab-btn.active{background:linear-gradient(135deg,#f6cf53,#d99919);color:#201605;box-shadow:0 3px 12px #efbd3b40}
+.ranks-card-list,.history-card-list{display:flex;flex-direction:column;gap:9px}
+.ranks-item-card{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:72px;padding:12px;border:1px solid #332443;border-radius:15px;background:linear-gradient(120deg,#1b1029,#120b1c);transition:transform .15s ease,border-color .15s ease}
+.ranks-item-card:active{transform:scale(.99)}
+.ranks-item-card.ranks-gold{border-color:#d6a838;background:linear-gradient(110deg,#302419,#1a1023);box-shadow:0 0 16px #e7b7381c}
+.ranks-item-card.ranks-silver{border-color:#8e93a1;background:linear-gradient(110deg,#252130,#17101f)}
+.ranks-item-card.ranks-bronze{border-color:#a76542;background:linear-gradient(110deg,#2a1c22,#17101f)}
+.ranks-item-card.ranks-me-highlight{outline:1px solid #10b981;outline-offset:1px}
+.ranks-item-left{display:flex;min-width:0;align-items:center;gap:10px}
+.ranks-position-box{display:grid;place-items:center;flex:none;width:34px;height:34px;font-size:23px}
+.ranks-position-number{color:#b3a5c2;font-size:16px}
+.ranks-user-info{display:flex;min-width:0;flex-direction:column;gap:3px}
+.ranks-user-name{overflow:hidden;color:#f8f3ff;font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.ranks-you-badge{color:#45dfa7;font-size:10px}
+.ranks-user-tag{color:#ad8cda;font-size:10px}
+.ranks-games-count{display:flex;flex:none;flex-direction:column;align-items:flex-end;gap:3px}
+.games-val{color:#f7d15c;font-size:18px;font-variant-numeric:tabular-nums}
+.games-unit{color:#afa2bd;font-size:9px}
+.ranks-empty-card,.history-empty-card{display:grid;justify-items:center;gap:8px;padding:26px 14px;border:1px dashed #443251;border-radius:15px;background:#160d2080;color:#b7a9c6;font-size:12px;text-align:center}
+.ranks-empty-card span,.history-empty-card span{font-size:25px}
+.ranks-card-skeleton,.history-card-skeleton{height:72px;border:1px solid #332443;border-radius:15px;background:linear-gradient(100deg,#160d20 30%,#241735 50%,#160d20 70%);background-size:200% 100%;animation:history-shimmer 1.2s linear infinite}
+.history-card-skeleton{height:105px}
+.history-item-card{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0;padding:13px 12px;border:1px solid #3b2d48;border-radius:16px;background:linear-gradient(145deg,#1b1128,#100a19);box-shadow:0 7px 20px #0002}
+.history-item-left{display:flex;min-width:0;align-items:center;gap:10px}
+.history-icon-circle{display:grid;place-items:center;flex:none;width:38px;height:38px;border:1px solid #49365c;border-radius:50%;background:#29183d;font-size:18px}
+.history-details-col{display:flex;min-width:0;flex-direction:column;gap:4px}
+.history-tx-title{color:#f7f2fc;font-size:12px;font-weight:850}
+.history-tx-meta{overflow:hidden;color:#c4b7d1;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.history-tx-time{color:#8e829a;font-size:9px}
+.history-item-right{display:flex;flex:none;flex-direction:column;align-items:flex-end;gap:5px}
+.history-tx-amount{font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.amount-positive{color:#42d99d}.amount-negative{color:#fb7185}
+.history-status-pill{padding:3px 6px;border:1px solid #34493f;border-radius:20px;background:#12251e;color:#9de3bd;font-size:8px;font-weight:800}
+@keyframes history-shimmer{to{background-position:-200% 0}}
+@media(max-width:360px){.history-item-card{gap:6px;padding:10px 8px}.history-icon-circle{width:32px;height:32px}.history-tx-amount{font-size:10px}.history-tx-title{font-size:11px}}
 `;
 
 createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);

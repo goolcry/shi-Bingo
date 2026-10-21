@@ -1831,7 +1831,7 @@ async function getProfile(telegramId) {
 
 async function getWalletHistory(telegramId, limit = 10) {
   const [rows] = await pool.query(
-    `SELECT id, type, amount, balance_after, description, created_at
+    `SELECT id, type, amount, balance_before, balance_after, description, created_at
      FROM wallet_transactions WHERE telegram_id = ?
      ORDER BY created_at DESC LIMIT ${Number(limit)}`,
     [String(telegramId)],
@@ -4422,6 +4422,7 @@ app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
        ORDER BY created_at DESC LIMIT 100`,
       [String(req.telegramUser.id), String(req.telegramUser.id), String(req.telegramUser.id)],
     );
+    res.set('Cache-Control', 'no-store, private');
     res.json({
       games: games.map((row) => ({
         roomId: String(row.room_id),
@@ -4441,29 +4442,69 @@ app.get('/api/history', authenticatedTelegramUser, async (req, res, next) => {
         description: row.description,
         createdAt: row.created_at,
       })),
+      history: transactions.map((row) => {
+        const amount = formatAmount(row.amount);
+        const isPositive = decimalToMinorUnits(row.balance_after) >= decimalToMinorUnits(row.balance_before);
+        const icons = {
+          GAME_ENTRY: '🎮',
+          GAME_REFUND: '↩️',
+          GAME_WIN: '🏆',
+          DEPOSIT: '💳',
+          WITHDRAWAL: '💸',
+          REFERRAL_REWARD: '🎁',
+          REFERRAL_BONUS: '🎁',
+          REGISTRATION_BONUS: '🎁',
+          ADMIN_ADJUSTMENT: '💰',
+        };
+        return {
+          id: String(row.id),
+          type: row.type,
+          icon: icons[row.type] || '💳',
+          direction: isPositive ? 'in' : 'out',
+          amount,
+          formattedAmount: `${isPositive ? '+' : '-'}${amount} BIRR`,
+          details: row.description,
+          status: 'COMPLETED',
+          createdAt: row.created_at,
+        };
+      }),
     });
   } catch (error) {
     next(error);
   }
 });
 
-app.get('/api/ranks', authenticatedTelegramUser, async (_req, res, next) => {
+app.get('/api/ranks', authenticatedTelegramUser, async (req, res, next) => {
   try {
     await initializeSchema();
+    const period = req.query.period === 'monthly' ? 'monthly' : 'weekly';
+    const intervalDays = period === 'monthly' ? 30 : 7;
     const [ranks] = await pool.execute(
-      `SELECT w.telegram_id, u.first_name, COUNT(DISTINCT w.room_id) AS games_won,
-         SUM(w.prize) AS winnings
-       FROM game_winners w JOIN users u ON u.telegram_id = w.telegram_id
-       GROUP BY w.telegram_id, u.first_name
-       ORDER BY winnings DESC, games_won DESC, MIN(w.created_at) ASC LIMIT 100`,
+      `SELECT wt.telegram_id, u.first_name, u.username, COUNT(*) AS games_played
+       FROM wallet_transactions wt
+       JOIN users u ON u.telegram_id = wt.telegram_id
+       WHERE wt.type = 'GAME_ENTRY'
+         AND wt.created_at >= DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL ${intervalDays} DAY)
+         AND NOT EXISTS (
+           SELECT 1 FROM wallet_transactions refund
+           WHERE refund.telegram_id = wt.telegram_id
+             AND refund.type = 'GAME_REFUND'
+             AND refund.reference_id = wt.reference_id
+         )
+       GROUP BY wt.telegram_id, u.first_name, u.username
+       ORDER BY games_played DESC, wt.telegram_id ASC
+       LIMIT 5`,
     );
+    res.set('Cache-Control', 'no-store, private');
     res.json({
-      ranks: ranks.map((rank, index) => ({
+      period,
+      top5: ranks.map((rank, index) => ({
         rank: index + 1,
         userId: String(rank.telegram_id),
-        displayName: rank.first_name,
-        gamesWon: Number(rank.games_won),
-        winnings: formatAmount(rank.winnings),
+        displayName: rank.first_name || (rank.username ? `@${rank.username}` : 'Player'),
+        username: rank.username,
+        gamesPlayed: Number(rank.games_played || 0),
+        isMe: String(rank.telegram_id) === String(req.telegramUser.id),
       })),
     });
   } catch (error) {
