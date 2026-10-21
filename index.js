@@ -2371,9 +2371,11 @@ async function ensureOpenRoom(creatorTelegramId = null) {
     const [available] = await connection.execute(
       `SELECT r.id FROM bingo_rooms r
        WHERE r.status = 'WAITING'
+         AND r.id = (SELECT MAX(waiting_room.id)
+                     FROM bingo_rooms waiting_room
+                     WHERE waiting_room.status = 'WAITING')
          AND (SELECT COUNT(*) FROM bingo_players p
               WHERE p.room_id = r.id AND p.left_at IS NULL) < r.max_players
-       ORDER BY r.created_at DESC
        LIMIT 1`,
     );
     if (available.length) {
@@ -3414,6 +3416,9 @@ app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
           WHERE cr.room_id = r.id AND cr.status = 'ACTIVE') AS selected_cartelas
        FROM bingo_rooms r
        WHERE r.status IN ('WAITING', 'PLAYING', 'VERIFYING')
+         AND (r.status <> 'WAITING' OR r.id = (
+           SELECT MAX(waiting_room.id) FROM bingo_rooms waiting_room WHERE waiting_room.status = 'WAITING'
+         ))
        ORDER BY (r.status = 'WAITING') DESC, r.created_at DESC
        LIMIT 30`,
       [],
@@ -3469,6 +3474,9 @@ app.get('/api/bootstrap', authenticatedTelegramUser, async (req, res, next) => {
           WHERE cr.room_id = r.id AND cr.status = 'ACTIVE') AS selected_cartelas
        FROM bingo_rooms r
        WHERE r.status IN ('WAITING', 'PLAYING', 'VERIFYING')
+         AND (r.status <> 'WAITING' OR r.id = (
+           SELECT MAX(waiting_room.id) FROM bingo_rooms waiting_room WHERE waiting_room.status = 'WAITING'
+         ))
        ORDER BY (r.status = 'WAITING') DESC, r.created_at DESC
        LIMIT 30`,
     );
@@ -3755,9 +3763,10 @@ app.get('/api/rooms/:id/cartelas', authenticatedTelegramUser, async (req, res, n
 
 app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req, res) => {
   res.set({
-    'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate, private',
     Pragma: 'no-cache',
     Expires: '0',
+    'Surrogate-Control': 'no-store',
   });
   try {
     await initializeSchema();

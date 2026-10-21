@@ -444,10 +444,13 @@ function App() {
   const refreshRooms = useCallback(async () => {
     setRoomsLoading(true);
     try {
+      const requestStartedAt = Date.now();
       const data = await api('/api/rooms', { initData, allowAnonymous: true });
-      setRooms(data.rooms);
+      const responseReceivedAt = Date.now();
+      const syncedRooms = data.rooms.map((item) => withRoomClock(item, requestStartedAt, responseReceivedAt));
+      setRooms(syncedRooms);
       setMyRoomId(data.myRoom ? String(data.myRoom) : null);
-      cacheAppRooms(data.rooms);
+      cacheAppRooms(syncedRooms);
       return data;
     } finally {
       setRoomsLoading(false);
@@ -652,19 +655,22 @@ function App() {
     let active = true;
     const refreshBootstrap = async () => {
       try {
+        const requestStartedAt = Date.now();
         const data = await request('/api/bootstrap');
+        const responseReceivedAt = Date.now();
         if (!active) return;
         setUser(data.user);
         setWallet(data.wallet.balance);
         setWalletDetails(data.wallet);
         setLang(data.user.language === 'am' ? 'am' : 'en');
-        setRooms(data.rooms);
+        const syncedRooms = data.rooms.map((item) => withRoomClock(item, requestStartedAt, responseReceivedAt));
+        setRooms(syncedRooms);
         setMyRoomId(data.myRoom ? String(data.myRoom) : null);
         setRoomsLoading(false);
         setError('');
         cacheAppProfile({ user: data.user, wallet: data.wallet });
-        cacheAppRooms(data.rooms);
-        const myRoom = data.rooms.find((item) => String(item.id) === String(data.myRoom));
+        cacheAppRooms(syncedRooms);
+        const myRoom = syncedRooms.find((item) => String(item.id) === String(data.myRoom));
         if (myRoom?.status === 'PLAYING') {
           loadRoom(data.myRoom, roomSessionRevision.current, undefined, { onlyReconnect: true })
             .catch((reason) => { if (active) setError(reason.message); });
@@ -846,7 +852,10 @@ function App() {
       inFlight = true;
       try {
         const requestStartedAt = Date.now();
-        const data = await request(`/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync`, { cache: 'no-store' });
+        const data = await request(
+          `/api/rooms/${encodeURIComponent(room.id)}/cartelas-sync?_t=${Date.now()}`,
+          { cache: 'no-store' },
+        );
         const responseReceivedAt = Date.now();
         if (!active || !Array.isArray(data.taken)) return;
         const serverTime = Number(data.serverTime);
@@ -1201,7 +1210,7 @@ function App() {
       : null;
     if (String(item.id) !== String(room?.id)) finishedRoomId.current = null;
     const sessionRevision = resetRoomState({ keepCurrentView });
-    setRoom(cachedRoom || withRoomClock({
+    setRoom(withRoomClock(cachedRoom || {
       ...item,
       pot: item.pot ?? item.prizePool,
       cartelas: [],
@@ -1536,7 +1545,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const displayPot = minorUnitsToMoney(multiplyMoney(potBase || '0', 1) + pendingPotDelta);
   const stakeMinorUnits = multiplyMoney(room.stake, 1);
   const stakeLabel = money(room.stake).replace(/\.00$/, '');
-  const timerLabel = waiting
+  const timerLabel = loading
+    ? '—'
+    : waiting
     ? secondsLeft === null ? '—' : `${secondsLeft}s`
     : room.status;
 
@@ -2587,8 +2598,8 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-grid-8col{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-auto-rows:32px;flex:0 0 220px;gap:4px;max-height:220px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:6px 10px;background:#140a28;border:1px solid #28174a;border-radius:10px;margin:0 10px 8px}
 .cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;height:32px;padding:0;border:1px solid #49316c;border-radius:6px;background:#281a4a;color:#fff;font-size:12px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
 .cartela-btn:active{transform:scale(.92)}
-.cartela-btn.taken{border-color:#dc2626;background:#ef4444;color:#fff;opacity:.9;pointer-events:none}
-.cartela-btn.mine{border-color:#059669;background:#10b981;color:#fff;box-shadow:0 0 8px #10b98199}
+.cartela-btn.taken{border-color:#dc2626!important;background:#ef4444!important;color:#fff!important;opacity:.9;pointer-events:none}
+.cartela-btn.mine{border-color:#059669!important;background:#10b981!important;color:#fff!important;box-shadow:0 0 8px #10b98199!important}
 .cartela-btn:disabled{opacity:1}.cartela-btn.loading{border-color:#49316c;background:#281a4a;color:#fff8}
 .cartela-previews{display:grid;flex:1 1 auto;align-content:start;gap:9px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 14px 12px}
 .cartela-preview-placeholder{margin:0;padding:12px 2px;color:#8b7fa8;font-size:12px;text-align:center}
