@@ -514,14 +514,20 @@ function App() {
         if (result.success !== true || result.accepted !== true) {
           throw new Error(result.error || 'Bingo claim was not accepted.');
         }
-        finishedRoomId.current = roomId;
+        const claimFinished = result.status === 'FINISHED';
+        if (claimFinished) finishedRoomId.current = roomId;
         const called = Array.isArray(result.calledNumbers) ? result.calledNumbers : claimedNumbers;
         setRoom((current) => current && String(current.id) === roomId
-          ? { ...current, status: 'FINISHED', finishedAt: result.finishedAt ?? current.finishedAt }
+          ? {
+            ...current,
+            status: result.status || 'VERIFYING',
+            finishedAt: result.finishedAt ?? current.finishedAt,
+            claimDeadline: result.claimDeadline ?? current.claimDeadline,
+          }
           : current);
         setGame((current) => current ? {
           ...current,
-          status: 'FINISHED',
+          status: result.status || 'VERIFYING',
           finishedAt: result.finishedAt ?? current.finishedAt,
           calledNumbers: called,
           currentNumber: called.at(-1) ?? current.currentNumber,
@@ -1896,6 +1902,7 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
   const finishedAt = Number(room?.finishedAt ?? game?.finishedAt);
   const clientClockOffset = Number(game?.clientClockOffset) || 0;
   const isFinished = game?.status === 'FINISHED' || room?.status === 'FINISHED';
+  const resolvingClaims = !isFinished && (claimPending || (room?.status === 'VERIFYING' && winners.length > 0));
   if (fallbackRoomId.current !== String(room?.id)) {
     fallbackRoomId.current = String(room?.id);
     fallbackDeadline.current = null;
@@ -1904,11 +1911,11 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     && fallbackDeadline.current === null) {
     fallbackDeadline.current = Number(pendingWinner?.countdownDeadline) || Date.now() + 7000;
   }
-  const countdownDeadline = Number.isFinite(finishedAt) && finishedAt > 0
+  const countdownDeadline = isFinished && Number.isFinite(finishedAt) && finishedAt > 0
     ? finishedAt + 7000 - clientClockOffset
-    : Number(room?.claimDeadline) > 0
+    : isFinished && Number(room?.claimDeadline) > 0
       ? Number(room.claimDeadline) - clientClockOffset
-      : fallbackDeadline.current;
+      : (claimPending || isFinished) ? fallbackDeadline.current : null;
   useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
   useEffect(() => {
     if (countdownDeadline === null) return undefined;
@@ -1917,8 +1924,7 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
       const remainingSeconds = Math.ceil(remainingMs / 1000);
       setSeconds(remainingSeconds);
       if (remainingMs === 0 && !claimPending
-        && (game?.status === 'FINISHED' || room?.status === 'FINISHED'
-          || (room?.status === 'VERIFYING' && winners.length > 0))
+        && (game?.status === 'FINISHED' || room?.status === 'FINISHED')
         && !advanceStarted.current) {
         advanceStarted.current = true;
         nextRoundRef.current();
@@ -1934,11 +1940,11 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     <div className="eyebrow">SHISHO BINGO · {t.roomNumber.replace('{number}', room?.roomNumber || room?.id || '—')}</div>
     <h1>{winners.length ? t.winnerHeadline : t.gameOver}</h1>
     <p className="winner-subtitle">{winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
-    {winners.length > 0 && <div className="winner-pot">{t.winnerPot.replace('{amount}', money(winner?.prize ?? room?.pot ?? room?.prizePool))}</div>}
+    {winners.length > 0 && <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool))}</div>}
     {winners.length > 0 && <div className="winner-list">
       {winners.map((item) => <div key={`${item.userId}-${item.cartelaNumber}`}>
         <b>👑 {item.username ? `@${item.username}` : item.displayName}</b>
-        <span>#{item.cartelaNumber}</span>
+        <span>#{item.cartelaNumber}{item.prize != null ? ` · ${money(item.prize)} ${t.currency}` : ''}</span>
       </div>)}
     </div>}
     {winningCard && <section className="winner-card-section">
@@ -1951,8 +1957,9 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
         </span>)}
       </div>
     </section>}
-    {!claimPending && winner && <div className="winner-verified">{t.verified}</div>}
-    {countdownDeadline !== null && <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>}
+    {!resolvingClaims && winner && <div className="winner-verified">{t.verified}</div>}
+    {resolvingClaims && <p className="winner-countdown">{t.claimingBingo}</p>}
+    {!resolvingClaims && countdownDeadline !== null && <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>}
   </section>;
 }
 
