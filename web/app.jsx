@@ -194,7 +194,7 @@ const words = {
     cartelaTakenAlert: 'ይህ ካርቴላ አስቀድሞ ተይዟል! / Cartela already taken!',
     maximumCartelas: 'Maximum 2 cartelas allowed', insufficientBalance: 'Insufficient balance.',
     backToRooms: 'Back to rooms', roomStatus: "You're in the room",
-    waitingPlayers: 'Waiting for players to choose their cartelas. The game starts when {count} players have selected a cartela.',
+    waitingPlayers: 'Waiting for players to choose their cartelas. The game starts when at least 3 cartelas are selected.',
     yourCartelas: 'YOUR CARTELAS', prizePool: 'PRIZE POOL', manageCartelas: 'Manage cartelas',
     leaveRefund: 'Leave room & refund', currentCalls: 'CURRENT BALL', recentCalls: 'RECENT',
     gameRound: 'ROOM', playersCount: 'PLAYERS', stakeLabel: 'STAKE', freeSpace: 'Free space',
@@ -263,7 +263,7 @@ const words = {
     cartelaTakenAlert: 'ይህ ካርቴላ አስቀድሞ ተይዟል! / Cartela already taken!',
     maximumCartelas: 'ከፍተኛው 2 ካርቴላ ብቻ ነው።', insufficientBalance: 'በቂ ቀሪ ሂሳብ የለም።',
     backToRooms: 'ወደ ክፍሎች ተመለስ', roomStatus: 'ወደ ክፍሉ ገብተዋል',
-    waitingPlayers: 'ተጫዋቾች ካርቴላ እስኪመርጡ ይጠብቁ። {count} ተጫዋቾች ካርቴላ ሲመርጡ ጨዋታው ይጀምራል።',
+    waitingPlayers: 'ተጫዋቾች ካርቴላ እስኪመርጡ ይጠብቁ። ቢያንስ 3 ካርቴላዎች ሲመረጡ ጨዋታው ይጀምራል።',
     yourCartelas: 'የእርስዎ ካርቴላዎች', prizePool: 'ጠቅላላ ሽልማት', manageCartelas: 'ካርቴላዎችን ያስተዳድሩ',
     leaveRefund: 'ከክፍሉ ይውጡ እና ገንዘቡን ይመልሱ', currentCalls: 'አሁን የወጣ ቁጥር', recentCalls: 'የቅርብ ጊዜ',
     gameRound: 'ክፍል', playersCount: 'ተጫዋቾች', stakeLabel: 'ውርርድ', freeSpace: 'ነፃ ቦታ',
@@ -934,13 +934,15 @@ function App() {
         if (Number.isFinite(snapshotServerTime) && snapshotServerTime < latestRoomServerTime.current) return;
         if (Number.isFinite(snapshotServerTime)) latestRoomServerTime.current = snapshotServerTime;
         const roomId = String(room.id);
-        const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+        const isFinishedStatus = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
+        const callIndex = Number(data.game?.callIndex) || 0;
+        const hasWinners = (data.winners?.length || 0) > 0 || (data.game?.winners?.length || 0) > 0;
+        const isFinished = isFinishedStatus && (hasWinners || callIndex >= 75);
         const hasPendingWinner = data.room.status === 'VERIFYING'
           && (data.winners?.length || data.game?.winners?.length);
         const shouldShowWinner = isFinished || Boolean(hasPendingWinner);
         if (claimRequestInFlight.current && !shouldShowWinner) return;
         if (finishedRoomId.current === roomId && !isFinished) return;
-        const callIndex = Number(data.game?.callIndex) || 0;
         if (!isFinished && lastGameCall.current.roomId === roomId
           && callIndex < lastGameCall.current.callIndex) return;
         if (isFinished) finishedRoomId.current = roomId;
@@ -1002,7 +1004,10 @@ function App() {
       const announcementAt = Number(data.winnerAnnouncementAtMs);
       const isClaim = data.type === 'CLAIMS_UPDATED';
       const isGameStarted = data.type === 'GAME_STARTED';
-      const isFinished = data.type === 'WINNER_ANNOUNCED' || status === 'FINISHED';
+      const hasWinners = Boolean(winners?.length);
+      const isFinished = data.type === 'WINNER_ANNOUNCED'
+        ? hasWinners || calledNumbers?.length >= 75
+        : status === 'FINISHED' && (hasWinners || calledNumbers?.length >= 75);
       const shouldShowWinner = isClaim || isFinished || (status === 'VERIFYING' && winners?.length);
       const startTimeMs = Number(data.startTimeMs ?? data.startedAt);
       const serverTime = Number(data.serverTime);
@@ -1015,7 +1020,9 @@ function App() {
           : existingCalls;
         return {
           ...(current || {}),
-          status: status || current?.status || 'PLAYING',
+          status: status === 'FINISHED' && !isFinished
+            ? current?.status || 'PLAYING'
+            : status || current?.status || 'PLAYING',
           calledNumbers: nextCalls,
           currentNumber: nextCalls.at(-1) ?? null,
           callIndex: nextCalls.length,
@@ -1026,7 +1033,7 @@ function App() {
             ? startTimeMs : current?.startTimeMs,
           serverNow: Number(data.serverTime) || current?.serverNow,
           clientClockOffset: clientClockOffset ?? current?.clientClockOffset,
-          winners: winners || current?.winners || [],
+          winners: hasWinners ? winners : current?.winners?.length ? current.winners : winners || [],
           winnerAnnouncementAtMs: Number.isFinite(announcementAt) && announcementAt > 0
             ? announcementAt
             : current?.winnerAnnouncementAtMs,
@@ -1037,7 +1044,7 @@ function App() {
         if (!current || String(current.id) !== roomId) return current;
         return {
           ...current,
-          status: status || current.status,
+          status: status === 'FINISHED' && !isFinished ? current.status : status || current.status,
           startedAt: Number.isFinite(startTimeMs) && startTimeMs > 0
             ? startTimeMs : current.startedAt,
           startTimeMs: Number.isFinite(startTimeMs) && startTimeMs > 0
@@ -1696,7 +1703,7 @@ function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh
       <div className="eyebrow">{t.roomNumber.replace('{number}', room.roomNumber || room.id)}</div>
       <h1>{t.roomStatus}</h1>
       <span className="status status-waiting">{t[['PLAYING', 'VERIFYING'].includes(room.status) ? 'playing' : 'waiting']}</span>
-      <p>{t.waitingPlayers.replace('{count}', room.minPlayers)}</p>
+      <p>{t.waitingPlayers}</p>
       <div className="room-info-grid">
         <div><small>{t.playersLabel}</small><b>{room.currentPlayers}/{room.maxPlayers}</b></div>
         <div><small>{t.yourCartelas}</small><b>{selected.map((card) => `#${card.number}`).join(', ') || '—'}</b></div>

@@ -82,8 +82,9 @@ const pool = mysql.createPool({
 const cartelaPrice = '10.00';
 const totalCartelas = 200;
 const roomMinPlayers = 2;
-const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
+const minimumCartelasToStart = 3;
+const roomMaxPlayers = totalCartelas;
 const SELECTION_CYCLE_MS = 40000;
 const roomCountdownSeconds = SELECTION_CYCLE_MS / 1000;
 function getNextSelectionEndTime() {
@@ -514,6 +515,10 @@ function initializeSchema() {
       await pool.execute(
         "UPDATE bingo_rooms SET min_players = ? WHERE status = 'WAITING' AND min_players <> ?",
         [roomMinPlayers, roomMinPlayers],
+      );
+      await pool.execute(
+        "UPDATE bingo_rooms SET max_players = ? WHERE status = 'WAITING' AND max_players < ?",
+        [roomMaxPlayers, roomMaxPlayers],
       );
       await pool.query(`
         CREATE TABLE IF NOT EXISTS bingo_lobby_lock (
@@ -2368,7 +2373,7 @@ async function ensureOpenRoom(creatorTelegramId = null) {
        WHERE r.status = 'WAITING'
          AND (SELECT COUNT(*) FROM bingo_players p
               WHERE p.room_id = r.id AND p.left_at IS NULL) < r.max_players
-       ORDER BY r.created_at ASC
+       ORDER BY r.created_at DESC
        LIMIT 1`,
     );
     if (available.length) {
@@ -2804,8 +2809,10 @@ async function getLiveRoomMemory(roomId) {
       serverTimeMs: Number(room.server_now_ms),
       finishedAtMs: room.finished_at_ms == null ? null : Number(room.finished_at_ms),
       claimDeadlineMs: room.claim_deadline_ms == null ? null : Number(room.claim_deadline_ms),
-      winnerAnnouncementAtMs: room.claim_deadline_ms == null
-        ? null : Number(room.claim_deadline_ms) - BINGO_CLAIM_GRACE_MS,
+      winnerAnnouncementAtMs: room.finished_at_ms != null
+        ? Number(room.finished_at_ms)
+        : room.claim_deadline_ms == null
+          ? null : Number(room.claim_deadline_ms) - BINGO_CLAIM_GRACE_MS,
       drawOrder: room.draw_order == null ? [] : parseDrawOrder(room.draw_order, calledNumbers),
       calledNumbers,
       takenCartelas: new Map(cartelas.map((card) => [
@@ -2858,6 +2865,7 @@ function announceFinishedRoom(roomId, { winners, prizePool, finishedAt, calledNu
     console.error(`[Winner announcement suppressed for room ${roomId}: claimants exist but settlement returned no winners.]`);
     return;
   }
+  const announcementAtMs = Number(finishedAt) || Number(winnerAnnouncementAtMs) || Date.now();
   const grossPot = formatAmount(prizePool);
   const netPot = minorUnitsToDecimal(decimalToMinorUnits(prizePool) * 80n / 100n);
   const memory = refreshLiveRoomMemory(roomId, {
@@ -2867,7 +2875,7 @@ function announceFinishedRoom(roomId, { winners, prizePool, finishedAt, calledNu
     prizePool: grossPot,
     finishedAtMs: finishedAt,
     calledNumbers,
-    winnerAnnouncementAtMs,
+    winnerAnnouncementAtMs: announcementAtMs,
   });
   const event = {
     type: 'WINNER_ANNOUNCED',
@@ -2878,7 +2886,7 @@ function announceFinishedRoom(roomId, { winners, prizePool, finishedAt, calledNu
     winners,
     calledNumbers,
     finishedAt,
-    winnerAnnouncementAtMs,
+    winnerAnnouncementAtMs: announcementAtMs,
     previewCartela: winners[0]?.cartelaNumber ?? null,
   };
   if (memory) broadcastGameEvent(roomId, event);
@@ -3083,7 +3091,7 @@ async function startDueRoom(roomId) {
     }
 
     const validReservations = await countValidReservations(connection, roomId);
-    if (validReservations.cartelas >= Number(room.min_players)) {
+    if (validReservations.cartelas >= minimumCartelasToStart) {
       const drawOrder = secureShuffleNumbers();
       await connection.execute(
         `UPDATE bingo_rooms SET status = 'PLAYING', started_at = CURRENT_TIMESTAMP(3),
