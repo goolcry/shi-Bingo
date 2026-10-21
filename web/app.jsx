@@ -993,6 +993,7 @@ function App() {
     const roomId = String(room.id);
     const applyGameEvent = (data) => {
       if (!active || String(roomId) !== String(room.id)) return;
+      const eventReceivedAt = Date.now();
       const status = data.status || (data.type === 'WINNER_ANNOUNCED' ? 'FINISHED' : null);
       const calledNumbers = Array.isArray(data.calledNumbers)
         ? parseNumberList(data.calledNumbers)
@@ -1004,6 +1005,8 @@ function App() {
       const isFinished = data.type === 'WINNER_ANNOUNCED' || status === 'FINISHED';
       const shouldShowWinner = isClaim || isFinished || (status === 'VERIFYING' && winners?.length);
       const startTimeMs = Number(data.startTimeMs ?? data.startedAt);
+      const serverTime = Number(data.serverTime);
+      const clientClockOffset = Number.isFinite(serverTime) ? serverTime - eventReceivedAt : null;
 
       setGame((current) => {
         const existingCalls = parseNumberList(current?.calledNumbers);
@@ -1022,6 +1025,7 @@ function App() {
           startTimeMs: Number.isFinite(startTimeMs) && startTimeMs > 0
             ? startTimeMs : current?.startTimeMs,
           serverNow: Number(data.serverTime) || current?.serverNow,
+          clientClockOffset: clientClockOffset ?? current?.clientClockOffset,
           winners: winners || current?.winners || [],
           winnerAnnouncementAtMs: Number.isFinite(announcementAt) && announcementAt > 0
             ? announcementAt
@@ -1348,6 +1352,7 @@ function App() {
       if (attempt < 4) await new Promise((resolve) => window.setTimeout(resolve, 800));
     }
     setError(lastError?.message || 'Could not enter the next round. Please try again.');
+    setView('play');
   }
 
   async function saveLanguage(value) {
@@ -1722,12 +1727,62 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
   );
   const activeAudioRef = audioRef;
   const frozenNumbersRef = useRef(null);
+  const roomId = String(room?.id || '');
+  const startTimeMs = Number(game?.startTimeMs ?? game?.startedAt ?? room?.startTimeMs ?? room?.startedAt);
+  const drawOrderKey = Array.isArray(game?.drawOrder)
+    ? game.drawOrder.join(',')
+    : String(game?.drawOrder || '');
+  const drawOrder = useMemo(() => parseNumberList(game?.drawOrder), [drawOrderKey]);
   const calledNumbers = useMemo(() => parseNumberList(game?.calledNumbers), [game?.calledNumbers]);
   const callsAreFrozen = room?.status !== 'PLAYING' || game?.status === 'FINISHED' || claimPaused || isClaiming;
+  const callIntervalMs = Math.max(1000, Number(game?.callIntervalMs) || 4000);
+  const clientClockOffset = Number(game?.clientClockOffset) || 0;
+  const [clockCallState, setClockCallState] = useState({ roomId: '', numbers: [] });
+  const lastProcessedIndexRef = useRef(-1);
+  const processedRoomRef = useRef('');
+  const processedStartRef = useRef(0);
+  const clockNumbers = clockCallState.roomId === roomId ? clockCallState.numbers : [];
+  const calledNumbersKey = calledNumbers.join(',');
+  useEffect(() => {
+    if (processedRoomRef.current !== roomId || processedStartRef.current !== startTimeMs) {
+      processedRoomRef.current = roomId;
+      processedStartRef.current = startTimeMs;
+      lastProcessedIndexRef.current = -1;
+    }
+    if (!roomId || !Number.isFinite(startTimeMs) || startTimeMs <= 0 || !drawOrder.length
+      || callsAreFrozen || !['PLAYING', 'VERIFYING'].includes(room?.status)) {
+      return undefined;
+    }
+
+    const updateClockCalls = () => {
+      const elapsedMs = Math.max(0, Date.now() + clientClockOffset - startTimeMs);
+      const dueCount = Math.min(drawOrder.length, Math.floor(elapsedMs / callIntervalMs));
+      const targetCount = Math.max(calledNumbers.length, dueCount);
+      const targetIndex = targetCount - 1;
+      if (targetIndex <= lastProcessedIndexRef.current) return;
+      lastProcessedIndexRef.current = targetIndex;
+      setClockCallState({ roomId, numbers: drawOrder.slice(0, targetCount) });
+    };
+
+    updateClockCalls();
+    const timer = window.setInterval(updateClockCalls, 200);
+    return () => window.clearInterval(timer);
+  }, [
+    roomId,
+    startTimeMs,
+    drawOrderKey,
+    drawOrder.length,
+    callIntervalMs,
+    clientClockOffset,
+    callsAreFrozen,
+    room?.status,
+    calledNumbersKey,
+  ]);
+  const liveNumbers = clockNumbers.length > calledNumbers.length ? clockNumbers : calledNumbers;
   const displayedNumbers = useMemo(() => {
     if (callsAreFrozen) return frozenNumbersRef.current || calledNumbers;
-    return calledNumbers;
-  }, [callsAreFrozen, calledNumbers]);
+    return liveNumbers;
+  }, [callsAreFrozen, calledNumbers, liveNumbers]);
   const displayedCalledSet = useMemo(() => new Set(displayedNumbers.map(Number)), [displayedNumbers]);
   const recent = displayedNumbers.slice(-4, -1).reverse();
   const currentNumber = displayedNumbers.at(-1) ?? null;
@@ -2105,9 +2160,9 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     <p className="winner-subtitle">{winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
     {winners.length > 0 && <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool))}</div>}
     {winners.length > 0 && <div className="winner-list">
-      {winners.map((item) => <div key={`${item.userId}-${item.cartelaNumber}`}>
-        <b>👑 {item.username ? `@${item.username}` : item.displayName}</b>
-        <span>#{item.cartelaNumber}{item.prize != null ? ` · ${money(item.prize)} ${t.currency}` : ''}</span>
+      {winners.map((item) => <div className="winner-identity-pill" key={`${item.userId}-${item.cartelaNumber}`}>
+        <b className="winner-username">👑 {item.username ? `@${item.username}` : item.displayName}</b>
+        <span className="winner-cartela-tag">#{item.cartelaNumber}{item.prize != null ? ` · ${money(item.prize)} ${t.currency}` : ''}</span>
       </div>)}
     </div>}
     {winningCard && <section className="winner-card-section">
@@ -2726,6 +2781,14 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .winner-dialog .winner-card-section{max-width:320px;padding:8px}.winner-dialog .winner-player-grid{grid-template-rows:repeat(6,minmax(20px,1fr));gap:3px}
 .winner-dialog .winner-player-grid>span{min-height:20px;font-size:10px}.winner-dialog .winner-player-grid>b{font-size:9px}
 @media(max-height:620px){.winner-overlay{align-items:start;padding-top:calc(8px + env(safe-area-inset-top))}.winner-dialog{max-height:96dvh;gap:5px;padding:10px}.winner-dialog .winner-trophy{font-size:32px}.winner-dialog .winner-card-section{padding:5px}.winner-dialog .winner-player-grid{grid-template-rows:repeat(6,minmax(16px,1fr))}.winner-dialog .winner-player-grid>span{min-height:16px}}
+.winner-app-shell .winner-dialog{height:auto;min-height:0;max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom));align-content:start;grid-auto-rows:max-content;overflow-x:hidden;overflow-y:auto}
+.winner-dialog .winner-list{display:flex;flex-direction:column;gap:6px;max-height:20dvh;overflow:auto}
+.winner-dialog .winner-list>div{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:40px;padding:7px 9px}
+.winner-dialog .winner-username{display:block;flex:1;min-width:0;overflow:hidden;color:#f7f0ff;font-size:11px;font-weight:800;text-align:left;text-overflow:ellipsis;white-space:nowrap}
+.winner-dialog .winner-cartela-tag{flex:none;max-width:55%;overflow:hidden;padding:4px 7px;border-radius:7px;background:#170d2c;color:#e7c64f;font-size:9px;font-weight:900;text-overflow:ellipsis;white-space:nowrap}
+.winner-dialog .winner-card-section{flex:none;margin:0 0 4px}
+.winner-dialog .winner-countdown{flex:none;padding:3px 0 2px}
+@media(max-height:620px){.winner-app-shell .winner-dialog{max-height:calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}.winner-dialog .winner-list{max-height:14dvh}.winner-dialog .winner-list>div{min-height:34px}}
 `;
 
 createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);

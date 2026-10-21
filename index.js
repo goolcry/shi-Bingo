@@ -2777,7 +2777,8 @@ async function getLiveRoomMemory(roomId) {
          UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_ends_at_ms,
          UNIX_TIMESTAMP(started_at) * 1000 AS started_at_ms,
          UNIX_TIMESTAMP(finished_at) * 1000 AS finished_at_ms,
-         UNIX_TIMESTAMP(claim_deadline) * 1000 AS claim_deadline_ms
+         UNIX_TIMESTAMP(claim_deadline) * 1000 AS claim_deadline_ms,
+         UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms
        FROM bingo_rooms WHERE id = ?`,
       [key],
     );
@@ -2800,6 +2801,7 @@ async function getLiveRoomMemory(roomId) {
       prizePool: formatAmount(room.prize_pool),
       selectionEndsAtMs: room.selection_ends_at_ms == null ? null : Number(room.selection_ends_at_ms),
       startedAtMs: room.started_at_ms == null ? null : Number(room.started_at_ms),
+      serverTimeMs: Number(room.server_now_ms),
       finishedAtMs: room.finished_at_ms == null ? null : Number(room.finished_at_ms),
       claimDeadlineMs: room.claim_deadline_ms == null ? null : Number(room.claim_deadline_ms),
       winnerAnnouncementAtMs: room.claim_deadline_ms == null
@@ -2840,7 +2842,7 @@ function roomGameSnapshot(memory) {
     drawOrder: memory.drawOrder,
     startTimeMs: memory.startedAtMs,
     startedAt: memory.startedAtMs,
-    serverTime: Date.now(),
+    serverTime: memory.serverTimeMs,
     winners: memory.status === 'FINISHED' ? memory.winners : memory.claimants,
     totalPot,
     netPot: minorUnitsToDecimal(decimalToMinorUnits(totalPot) * 80n / 100n),
@@ -2971,7 +2973,8 @@ async function advanceRoomGame(roomId) {
       throw new Error('BINGO_CALL_INTERVAL_SECONDS must be an integer from 1 to 3600.');
     }
     const [[elapsed]] = await connection.execute(
-      `SELECT GREATEST(0, TIMESTAMPDIFF(MICROSECOND, started_at, CURRENT_TIMESTAMP(3)) / 1000000) AS seconds
+      `SELECT GREATEST(0, TIMESTAMPDIFF(MICROSECOND, started_at, CURRENT_TIMESTAMP(3)) / 1000000) AS seconds,
+         UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms
        FROM bingo_rooms WHERE id = ?`,
       [roomId],
     );
@@ -3045,6 +3048,7 @@ async function advanceRoomGame(roomId) {
       prizePool: formatAmount(room.prize_pool),
       drawOrder,
       calledNumbers,
+      serverTimeMs: Number(elapsed.server_now_ms),
     });
     if (calledNumbers.length > calls.length) {
       broadcastGameEvent(roomId, {
@@ -3052,6 +3056,7 @@ async function advanceRoomGame(roomId) {
         status: 'PLAYING',
         calledNumbers,
         callIndex: calledNumbers.length,
+        serverTime: Number(elapsed.server_now_ms),
       });
     }
   } catch (error) {
@@ -3086,7 +3091,9 @@ async function startDueRoom(roomId) {
         [JSON.stringify(drawOrder), roomId],
       );
       const [[startedRoom]] = await connection.execute(
-        'SELECT UNIX_TIMESTAMP(started_at) * 1000 AS started_at_ms FROM bingo_rooms WHERE id = ?',
+        `SELECT UNIX_TIMESTAMP(started_at) * 1000 AS started_at_ms,
+           UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms
+         FROM bingo_rooms WHERE id = ?`,
         [roomId],
       );
       const startTimeMs = Number(startedRoom.started_at_ms);
@@ -3097,7 +3104,7 @@ async function startDueRoom(roomId) {
         roomId: String(roomId),
         status: 'PLAYING',
         startTimeMs,
-        serverTime: Date.now(),
+        serverTime: Number(startedRoom.server_now_ms),
         drawOrder,
       });
       await getLiveRoomMemory(roomId);
@@ -3114,7 +3121,7 @@ async function startDueRoom(roomId) {
         roomId: String(roomId),
         status: 'PLAYING',
         startTimeMs,
-        serverTime: Date.now(),
+        serverTime: Number(startedRoom.server_now_ms),
         drawOrder,
         calledNumbers: [],
         callIndex: 0,
@@ -3594,6 +3601,10 @@ app.get('/api/rooms/:id/game-stream', authenticatedCartelaSyncUser, async (req, 
 
     const memory = await getLiveRoomMemory(roomId);
     if (res.destroyed || res.writableEnded) return;
+    const [[clock]] = await pool.execute(
+      'SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms',
+    );
+    memory.serverTimeMs = Number(clock.server_now_ms);
     res.write(`data: ${JSON.stringify(roomGameSnapshot(memory))}\n\n`);
     const pendingEvents = res.gameEventsPending;
     res.gameEventsPending = null;
