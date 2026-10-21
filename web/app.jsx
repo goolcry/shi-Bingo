@@ -23,6 +23,9 @@ const minorUnitsToMoney = (minorUnits) => {
 const telegramWebApp = () => window.Telegram?.WebApp;
 const MAX_CARTELAS_PER_PLAYER = 2;
 const TOTAL_CARTELAS = 200;
+let serverClockOffsetMs = 0;
+let hasServerClockOffset = false;
+let latestServerClockRequestStartedAt = 0;
 let audioUnlocked = false;
 let audioUnlockInFlight = false;
 const callAudio = typeof Audio !== 'undefined' ? new Audio() : null;
@@ -102,6 +105,24 @@ const gameWithClockOffset = (game, requestStartedAt, responseReceivedAt = Date.n
     clientClockOffset: Number(game.serverNow) - (requestStartedAt + responseReceivedAt) / 2,
   }
   : null;
+
+function updateServerClockOffset(serverTime, requestStartedAt = Date.now(), responseReceivedAt = Date.now()) {
+  const timestamp = Number(serverTime);
+  if (!Number.isFinite(timestamp) || timestamp <= 0 || requestStartedAt < latestServerClockRequestStartedAt) return;
+  serverClockOffsetMs = timestamp - (requestStartedAt + responseReceivedAt) / 2;
+  latestServerClockRequestStartedAt = requestStartedAt;
+  hasServerClockOffset = true;
+}
+
+function getSynchronizedServerNow() {
+  return Date.now() + (hasServerClockOffset ? serverClockOffsetMs : 0);
+}
+
+function getRemainingSeconds(endsAtMs) {
+  const deadline = Number(endsAtMs);
+  if (!Number.isFinite(deadline) || deadline <= 0) return null;
+  return Math.max(0, Math.ceil((deadline - getSynchronizedServerNow()) / 1000));
+}
 
 function parseNumberList(value) {
   let parsed = value;
@@ -322,6 +343,7 @@ const words = {
 
 async function api(path, { method = 'GET', body, initData, allowAnonymous = false, signal, cache } = {}) {
   if (!initData && !allowAnonymous) throw new Error('Open this Mini App from Telegram to authenticate.');
+  const requestStartedAt = Date.now();
   const response = await fetch(path, {
     method,
     headers: {
@@ -332,6 +354,7 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
     ...(signal ? { signal } : {}),
     ...(cache ? { cache } : {}),
   });
+  const responseReceivedAt = Date.now();
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const requestId = data.requestId || response.headers.get('x-request-id');
@@ -342,11 +365,18 @@ async function api(path, { method = 'GET', body, initData, allowAnonymous = fals
     error.requestId = requestId;
     throw error;
   }
+  const serverTime = data.room?.countdown?.serverNow
+    ?? data.rooms?.find((room) => room.countdown?.serverNow)?.countdown?.serverNow
+    ?? data.room?.serverNow
+    ?? data.serverNow
+    ?? data.serverTime;
+  updateServerClockOffset(serverTime, requestStartedAt, responseReceivedAt);
   return data;
 }
 
 function withRoomClock(room, requestStartedAt = Date.now(), responseReceivedAt = Date.now()) {
   if (!room?.countdown) return room;
+  updateServerClockOffset(room.countdown.serverNow, requestStartedAt, responseReceivedAt);
   return {
     ...room,
     countdown: {
@@ -759,6 +789,7 @@ function App() {
       }
       if (data.type === 'TIMER_RECYCLED' || data.type === 'TIMER_EXTENDED') {
         const serverTime = Number(data.serverTime);
+        updateServerClockOffset(serverTime);
         const serverOffset = Number.isFinite(serverTime) ? serverTime - Date.now() : 0;
         setRoom((current) => current && String(current.id) === roomId
           ? {
@@ -774,7 +805,8 @@ function App() {
           : current);
         return;
       }
-      if (data.type === 'SNAPSHOT' && Array.isArray(data.taken)) {
+      if ((data.type === 'SNAPSHOT' || data.type === 'CARTELA_UPDATE') && Array.isArray(data.taken)) {
+        updateServerClockOffset(data.serverTime);
         const owners = new Map(data.taken.map((item) => [Number(item.number), String(item.userId)]));
         setRoom((current) => {
           if (!current || String(current.id) !== roomId) return current;
@@ -793,6 +825,7 @@ function App() {
 
       const number = Number(data.number);
       if (!Number.isInteger(number) || number < 1 || number > 200) return;
+      updateServerClockOffset(data.serverTime);
       setRoom((current) => {
         if (!current || String(current.id) !== roomId) return current;
         const cartelas = current.cartelas.map((card) => {
@@ -1564,7 +1597,7 @@ function PlayScreen({ t, rooms, myRoomId, roomsLoading, onJoin, busy, onRefresh 
 }
 
 function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave, onRefresh = async () => {}, onNotify }) {
-  const [clockNow, setClockNow] = useState(Date.now());
+  const [, setClockNow] = useState(Date.now());
   const [overrides, setOverrides] = useState({});
   const [pending, setPending] = useState({});
   const [balanceBase, setBalanceBase] = useState(wallet);
@@ -1575,11 +1608,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const noticeTimer = useRef(null);
   const waiting = room.status === 'WAITING';
   const countdown = room.countdown || {};
-  const serverNow = clockNow + Number(countdown.clientOffset || 0);
-  const countdownDeadline = Number(countdown.deadline);
-  const secondsLeft = Number.isFinite(countdownDeadline)
-    ? Math.max(0, Math.ceil((countdownDeadline - serverNow) / 1000))
-    : null;
+  const serverNow = getSynchronizedServerNow();
+  const countdownDeadline = countdown.deadline == null ? NaN : Number(countdown.deadline);
+  const secondsLeft = getRemainingSeconds(countdownDeadline);
   const selectionOpen = waiting && (Number.isFinite(countdownDeadline)
     ? serverNow < countdownDeadline
     : loading);
@@ -2743,7 +2774,7 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 .cartela-grid-8col{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-auto-rows:32px;flex:0 0 220px;gap:4px;max-height:220px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:6px 10px;background:#140a28;border:1px solid #28174a;border-radius:10px;margin:0 10px 8px}
 .cartela-btn{display:flex;align-items:center;justify-content:center;min-width:0;height:32px;padding:0;border:1px solid #49316c;border-radius:6px;background:#281a4a;color:#fff;font-size:12px;font-weight:800;line-height:1;touch-action:manipulation;transition:transform .08s ease}
 .cartela-btn:active{transform:scale(.92)}
-.cartela-btn.taken{border-color:#dc2626!important;background:#ef4444!important;color:#fff!important;opacity:.9;pointer-events:none}
+.cartela-btn.taken{border-color:#dc2626!important;background:#ef4444!important;color:#fff!important;opacity:1!important;pointer-events:none}
 .cartela-btn.mine{border-color:#059669!important;background:#10b981!important;color:#fff!important;box-shadow:0 0 8px #10b98199!important}
 .cartela-btn:disabled{opacity:1}.cartela-btn.loading{border-color:#49316c;background:#281a4a;color:#fff8}
 .cartela-previews{display:grid;flex:1 1 auto;align-content:start;gap:9px;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:2px 14px 12px}

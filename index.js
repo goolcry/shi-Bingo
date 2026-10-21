@@ -3561,9 +3561,13 @@ app.get('/api/rooms/:id/cartelas-stream', authenticatedCartelaSyncUser, async (r
        ORDER BY cartela_number`,
       [roomId],
     );
+    const [[clock]] = await pool.execute(
+      'SELECT UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms',
+    );
     if (res.destroyed || res.writableEnded) return;
     res.write(`data: ${JSON.stringify({
       type: 'SNAPSHOT',
+      serverTime: Number(clock.server_now_ms),
       taken: rows.map((row) => ({
         number: Number(row.cartela_number),
         userId: String(row.owner_telegram_id),
@@ -3966,6 +3970,7 @@ async function selectCartelaHandler(req, res, next) {
       type: 'TAKEN',
       number,
       userId: telegramId,
+      serverTime: Date.now(),
     });
     res.json({
       selected: true,
@@ -4068,6 +4073,7 @@ async function deselectCartelaHandler(req, res, next) {
       type: 'RELEASED',
       number,
       userId: String(req.telegramUser.id),
+      serverTime: Date.now(),
     });
     res.json({
       selected: false,
