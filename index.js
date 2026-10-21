@@ -83,7 +83,11 @@ const totalCartelas = 200;
 const roomMinPlayers = 2;
 const roomMaxPlayers = 20;
 const maxCartelasPerPlayer = 2;
-const roomCountdownSeconds = 30;
+const SELECTION_CYCLE_MS = 40000;
+const roomCountdownSeconds = SELECTION_CYCLE_MS / 1000;
+function getNextSelectionEndTime() {
+  return Date.now() + SELECTION_CYCLE_MS;
+}
 const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
 const minimumDeposit = '20.00';
 const supportUrl = 'https://t.me/bigbards';
@@ -387,8 +391,8 @@ function initializeSchema() {
           started_at TIMESTAMP(3) NULL,
           draw_order JSON NULL,
           claim_deadline TIMESTAMP NULL,
-          selection_started_at TIMESTAMP NULL,
-          selection_deadline TIMESTAMP NULL,
+          selection_started_at TIMESTAMP(3) NULL,
+          selection_deadline TIMESTAMP(3) NULL,
           finished_at TIMESTAMP NULL,
           last_call_at TIMESTAMP NULL,
           KEY idx_room_status_created (status, created_at),
@@ -413,6 +417,16 @@ function initializeSchema() {
       }
       if (!existingCountdownColumns.has('selection_deadline')) {
         await pool.query('ALTER TABLE bingo_rooms ADD COLUMN selection_deadline TIMESTAMP NULL');
+      }
+      const [selectionPrecisionColumns] = await pool.execute(
+        `SELECT column_name, datetime_precision FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'bingo_rooms'
+           AND column_name IN ('selection_started_at', 'selection_deadline')`,
+      );
+      for (const column of selectionPrecisionColumns) {
+        if (Number(column.datetime_precision || 0) < 3) {
+          await pool.query(`ALTER TABLE bingo_rooms MODIFY ${column.column_name} TIMESTAMP(3) NULL`);
+        }
       }
       const [drawOrderColumns] = await pool.execute(
         `SELECT COUNT(*) AS count FROM information_schema.columns
@@ -446,8 +460,12 @@ function initializeSchema() {
         `UPDATE bingo_rooms SET
            selection_started_at = COALESCE(selection_started_at, created_at),
            selection_deadline = COALESCE(selection_deadline,
-             DATE_ADD(COALESCE(selection_started_at, created_at), INTERVAL ${roomCountdownSeconds} SECOND))
-         WHERE selection_started_at IS NULL OR selection_deadline IS NULL`,
+             DATE_ADD(COALESCE(selection_started_at, created_at), INTERVAL ${roomCountdownSeconds} SECOND))`,
+      );
+      await pool.query(
+        `UPDATE bingo_rooms
+         SET selection_deadline = DATE_ADD(selection_started_at, INTERVAL ${roomCountdownSeconds} SECOND)
+         WHERE status = 'WAITING' AND selection_started_at IS NOT NULL`,
       );
       await pool.execute(
         "UPDATE bingo_rooms SET min_players = ? WHERE status = 'WAITING' AND min_players <> ?",
@@ -2302,8 +2320,10 @@ async function ensureOpenRoom(creatorTelegramId = null) {
     const [inserted] = await connection.execute(
       `INSERT INTO bingo_rooms
        (room_number, stake, min_players, max_players, created_by, selection_started_at, selection_deadline)
-       VALUES ('pending', ?, ?, ?, ?, CURRENT_TIMESTAMP, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL ${roomCountdownSeconds} SECOND))`,
-      [cartelaPrice, roomMinPlayers, roomMaxPlayers, creatorTelegramId ? String(creatorTelegramId) : null],
+       VALUES ('pending', ?, ?, ?, ?, CURRENT_TIMESTAMP(3),
+         FROM_UNIXTIME(? / 1000))`,
+      [cartelaPrice, roomMinPlayers, roomMaxPlayers, creatorTelegramId ? String(creatorTelegramId) : null,
+       getNextSelectionEndTime()],
     );
     const roomId = String(inserted.insertId);
     const slots = Array.from({ length: totalCartelas }, (_, index) => [
@@ -2711,7 +2731,7 @@ async function startDueRoom(roomId) {
     await connection.beginTransaction();
     const [[room]] = await connection.execute(
       `SELECT status, min_players, selection_deadline,
-         DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3) AS is_due
+         selection_deadline <= CURRENT_TIMESTAMP(3) AS is_due
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [roomId],
     );
@@ -2736,10 +2756,10 @@ async function startDueRoom(roomId) {
 
     await connection.execute(
       `UPDATE bingo_rooms
-       SET selection_started_at = CURRENT_TIMESTAMP,
-           selection_deadline = DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 20 SECOND)
+       SET selection_started_at = CURRENT_TIMESTAMP(3),
+           selection_deadline = FROM_UNIXTIME(? / 1000)
        WHERE id = ? AND status = 'WAITING'`,
-      [roomId],
+      [getNextSelectionEndTime(), roomId],
     );
     await connection.commit();
     const [[updatedRoom]] = await pool.execute(
@@ -2749,7 +2769,7 @@ async function startDueRoom(roomId) {
       [roomId],
     );
     broadcastCartelaEvent(roomId, {
-      type: 'TIMER_EXTENDED',
+      type: 'TIMER_RECYCLED',
       selectionEndsAtMs: Number(updatedRoom.selection_deadline_ms),
       serverTime: Number(updatedRoom.server_now_ms),
     });
@@ -2767,7 +2787,7 @@ async function startDueRooms() {
   const [rooms] = await pool.execute(
     `SELECT id FROM bingo_rooms
      WHERE status = 'WAITING'
-       AND DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)
+       AND selection_deadline <= CURRENT_TIMESTAMP(3)
      ORDER BY selection_deadline ASC LIMIT 100`,
   );
   const [verifyingRooms] = await pool.execute(
@@ -2985,6 +3005,8 @@ app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
     const telegramId = req.telegramUser ? String(req.telegramUser.id) : null;
     const [rooms] = await pool.execute(
       `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
+         UNIX_TIMESTAMP(r.selection_deadline) * 1000 AS selection_deadline_ms,
+         UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms,
          (SELECT COUNT(*) FROM bingo_players p
           WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players,
          (SELECT COUNT(*) FROM cartela_reservations cr
@@ -3003,8 +3025,10 @@ app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
         [telegramId],
       ))[0]
       : [];
+    res.set('Cache-Control', 'no-store');
     res.json({
       myRoom: myRooms[0] ? String(myRooms[0].id) : null,
+      serverTime: Date.now(),
       rooms: rooms.map((room) => ({
         id: String(room.id),
         roomNumber: room.room_number,
@@ -3015,6 +3039,12 @@ app.get('/api/rooms', optionalTelegramUser, async (req, res, next) => {
         selectedCartelas: Number(room.selected_cartelas),
         prizePool: formatAmount(room.prize_pool),
         status: room.status,
+        selectionEndsAtMs: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+        countdown: {
+          deadline: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+          serverNow: Number(room.server_now_ms),
+          durationSeconds: roomCountdownSeconds,
+        },
       })),
     });
   } catch (error) {
@@ -3030,6 +3060,8 @@ app.get('/api/bootstrap', authenticatedTelegramUser, async (req, res, next) => {
     await ensureOpenRoom(String(req.telegramUser.id));
     const [rooms] = await pool.execute(
       `SELECT r.id, r.room_number, r.stake, r.min_players, r.max_players, r.prize_pool, r.status,
+         UNIX_TIMESTAMP(r.selection_deadline) * 1000 AS selection_deadline_ms,
+         UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 AS server_now_ms,
          (SELECT COUNT(*) FROM bingo_players p
           WHERE p.room_id = r.id AND p.left_at IS NULL) AS current_players,
          (SELECT COUNT(*) FROM cartela_reservations cr
@@ -3070,8 +3102,14 @@ app.get('/api/bootstrap', authenticatedTelegramUser, async (req, res, next) => {
         selectedCartelas: Number(room.selected_cartelas),
         prizePool: formatAmount(room.prize_pool),
         status: room.status,
+        selectionEndsAtMs: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+        countdown: {
+          deadline: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+          serverNow: Number(room.server_now_ms),
+          durationSeconds: roomCountdownSeconds,
+        },
       })),
-      serverTime: Date.now(),
+      serverTime: rooms[0] ? Number(rooms[0].server_now_ms) : Date.now(),
     });
   } catch (error) {
     next(error);
@@ -3268,7 +3306,7 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
     const roomId = String(req.params.id);
     const [[dueStatus]] = await pool.execute(
       `SELECT status,
-         DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3) AS is_due
+         selection_deadline <= CURRENT_TIMESTAMP(3) AS is_due
        FROM bingo_rooms WHERE id = ?`,
       [roomId],
     );
@@ -3310,6 +3348,7 @@ app.get('/api/rooms/:id/cartelas-sync', authenticatedCartelaSyncUser, async (req
     res.json({
       serverTime,
       selectionEndsAt: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
+      selectionEndsAtMs: room.selection_deadline_ms == null ? null : Number(room.selection_deadline_ms),
       status: room.status,
       pot: minorUnitsToDecimal(decimalToMinorUnits(room.prize_pool) * 80n / 100n),
       playersCount: Number(players.count),
@@ -3352,7 +3391,7 @@ async function selectCartelaHandler(req, res, next) {
     transactionStarted = true;
     const [rooms] = await connection.execute(
       `SELECT *, (selection_deadline IS NULL
-         OR DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)) AS selection_expired
+         OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [req.params.id],
     );
@@ -3497,7 +3536,7 @@ async function deselectCartelaHandler(req, res, next) {
     await connection.beginTransaction();
     const [rooms] = await connection.execute(
       `SELECT *, (selection_deadline IS NULL
-         OR DATE_ADD(selection_deadline, INTERVAL 1500000 MICROSECOND) <= CURRENT_TIMESTAMP(3)) AS selection_expired
+         OR selection_deadline <= CURRENT_TIMESTAMP(3)) AS selection_expired
        FROM bingo_rooms WHERE id = ? FOR UPDATE`,
       [req.params.id],
     );
@@ -4845,7 +4884,7 @@ if (require.main === module) {
         lifecycleTickRunning = false;
       }
     };
-    const lifecycleTicker = setInterval(runLifecycleTick, 1000);
+    const lifecycleTicker = setInterval(runLifecycleTick, 500);
     lifecycleTicker.unref();
     void runLifecycleTick();
     app.listen(port, () => console.log(`SHISHO BINGO listening on port ${port}`));

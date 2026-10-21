@@ -440,6 +440,7 @@ function App() {
   const loadRoom = useCallback(async (id, sessionRevision = roomSessionRevision.current, signal, { onlyReconnect = false } = {}) => {
     const requestStartedAt = Date.now();
     const data = await request(`/api/rooms/${encodeURIComponent(id)}/state`, { signal });
+    const responseReceivedAt = Date.now();
     if (sessionRevision !== roomSessionRevision.current) return data;
     const roomId = String(id);
     const isFinished = data.room.status === 'FINISHED' || data.game?.status === 'FINISHED';
@@ -452,7 +453,7 @@ function App() {
     } else if (finishedRoomId.current !== roomId) {
       finishedRoomId.current = null;
     }
-    setRoom(withRoomClock(data.room, requestStartedAt));
+    setRoom(withRoomClock(data.room, requestStartedAt, responseReceivedAt));
     setRoomReady(true);
     setGame(gameWithClockOffset(data.game, requestStartedAt));
     if (data.wallet?.availableBalance !== undefined) {
@@ -686,7 +687,7 @@ function App() {
         loadRoom(roomId).catch((error) => console.warn('[Game start state refresh failed]:', error));
         return;
       }
-      if (data.type === 'TIMER_EXTENDED') {
+      if (data.type === 'TIMER_RECYCLED' || data.type === 'TIMER_EXTENDED') {
         const serverTime = Number(data.serverTime);
         const serverOffset = Number.isFinite(serverTime) ? serverTime - Date.now() : 0;
         setRoom((current) => current && String(current.id) === roomId
@@ -821,11 +822,12 @@ function App() {
             changed = true;
             return { ...card, state };
           });
-          const countdown = data.selectionEndsAt == null || data.serverTime == null
+          const selectionEndsAt = data.selectionEndsAtMs ?? data.selectionEndsAt;
+          const countdown = selectionEndsAt == null || data.serverTime == null
             ? current.countdown
             : {
               ...current.countdown,
-              deadline: Number(data.selectionEndsAt),
+              deadline: Number(selectionEndsAt),
               serverNow: serverTime,
               clientOffset: serverTime - (requestStartedAt + responseReceivedAt) / 2,
             };
@@ -906,7 +908,7 @@ function App() {
           telegramWebApp()?.HapticFeedback?.impactOccurred?.('medium');
         }
         lastGameCall.current = { roomId, number: currentNumber, callIndex };
-        setRoom(withRoomClock(data.room, requestStartedAt));
+        setRoom(withRoomClock(data.room, requestStartedAt, responseReceivedAt));
         setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
         setWallet(data.wallet?.availableBalance ?? wallet);
         if (shouldShowWinner) {
@@ -1050,7 +1052,7 @@ function App() {
       const responseReceivedAt = Date.now();
       if (sessionRevision !== roomSessionRevision.current) return;
       roomStateRevision.current += 1;
-      setRoom(withRoomClock(data.room, requestStartedAt));
+      setRoom(withRoomClock(data.room, requestStartedAt, responseReceivedAt));
       setRoomReady(true);
       setGame(gameWithClockOffset(data.game, requestStartedAt, responseReceivedAt));
       setWallet(me.wallet.availableBalance ?? me.wallet.balance ?? data.wallet.availableBalance);
@@ -1340,9 +1342,9 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const countdownDeadline = Number(countdown.deadline);
   const secondsLeft = Number.isFinite(countdownDeadline)
     ? Math.max(0, Math.ceil((countdownDeadline - serverNow) / 1000))
-    : 30;
+    : null;
   const selectionOpen = waiting && (Number.isFinite(countdownDeadline)
-    ? serverNow < countdownDeadline + 1500
+    ? serverNow < countdownDeadline
     : loading);
   const roomCards = loading
     ? Array.from({ length: TOTAL_CARTELAS }, (_, index) => ({ number: index + 1, state: 'AVAILABLE' }))
@@ -1363,11 +1365,11 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   const stakeMinorUnits = multiplyMoney(room.stake, 1);
   const stakeLabel = money(room.stake).replace(/\.00$/, '');
   const timerLabel = waiting
-    ? secondsLeft < 60 ? `${secondsLeft}s` : `${Math.floor(secondsLeft / 60)}:${String(secondsLeft % 60).padStart(2, '0')}`
+    ? secondsLeft === null ? '—' : `${secondsLeft}s`
     : room.status;
 
   useEffect(() => {
-    const timer = window.setInterval(() => setClockNow(Date.now()), 250);
+    const timer = window.setInterval(() => setClockNow(Date.now()), 200);
     return () => window.clearInterval(timer);
   }, []);
 
@@ -1401,7 +1403,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
   }
 
   useEffect(() => {
-    if (!waiting || !Number.isFinite(countdownDeadline) || serverNow < countdownDeadline + 1500) {
+    if (!waiting || !Number.isFinite(countdownDeadline) || serverNow < countdownDeadline) {
       lockoutRefreshTriggered.current = false;
       return;
     }
