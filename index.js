@@ -42,7 +42,7 @@ const config = {
   appUrl: process.env.MINI_APP_URL.replace(/\/+$/, ''),
   publicUrl: (process.env.WEBHOOK_BASE_URL || process.env.MINI_APP_URL).replace(/\/+$/, ''),
   botUsername: (process.env.BOT_USERNAME || '').replace(/^@/, ''),
-  supportUsername: (process.env.SUPPORT_USERNAME || '').replace(/^@/, ''),
+  supportUsername: (process.env.SUPPORT_USERNAME || 'ShishobingoSupport').replace(/^@/, ''),
   channelUrl: process.env.CHANNEL_URL || process.env.SUPPORT_CHANNEL_URL || '',
   supportUrl: process.env.SUPPORT_URL || '',
   channelChatId: process.env.CHANNEL_CHAT_ID || '',
@@ -90,7 +90,7 @@ function getNextSelectionEndTime() {
 }
 const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
 const minimumDeposit = '20.00';
-const supportUrl = 'https://t.me/bigbards';
+const supportUrl = config.supportUrl || `https://t.me/${config.supportUsername}`;
 const activeRoomCartelaCache = new Map();
 const roomCartelaCacheWarmups = new Map();
 const cartelaSyncAuthCache = new Map();
@@ -1080,7 +1080,7 @@ function supportCenterText() {
     'Need help with deposits, withdrawals, or gameplay? Our support team is ready to assist you.',
     'ገንዘብ ገቢ ወይም ወጪ ለማድረግ፣ እንዲሁም ስለ ጨዋታው ማንኛውም ጥያቄ ካለዎት ድጋፍ ሰጪዎቻችንን ያነጋግሩ።',
     '',
-    '📌 Direct Support: @bigbards',
+    `📌 Direct Support: @${config.supportUsername}`,
     '📢 Official Channel: https://t.me/+D2i3HE1qVKk4NDU8',
     '⚠️ Security Notice: Never share passwords, SMS codes, or payment PINs.',
   ].join('\n');
@@ -2617,9 +2617,8 @@ async function deliverWinnerNotifications() {
   winnerNotificationPumpRunning = true;
   try {
     const [pending] = await pool.execute(
-      `SELECT n.room_id, n.telegram_id, n.attempts, u.first_name
+      `SELECT n.room_id, n.telegram_id, n.attempts
        FROM game_winner_notifications n
-       JOIN users u ON u.telegram_id = n.telegram_id
        WHERE n.sent_at IS NULL AND n.next_attempt_at <= CURRENT_TIMESTAMP(3)
        ORDER BY n.next_attempt_at LIMIT 5`,
     );
@@ -2640,9 +2639,12 @@ async function deliverWinnerNotifications() {
           [notification.room_id, notification.telegram_id],
         );
         const [[stakeRow]] = await pool.execute(
-          `SELECT COUNT(*) AS cartela_count, COALESCE(SUM(amount), 0.00) AS stake
-           FROM cartela_reservations
-           WHERE room_id = ? AND telegram_id = ? AND status = 'ACTIVE'`,
+          `SELECT COUNT(*) AS cartela_count, COALESCE(SUM(r.amount), 0.00) AS stake
+           FROM game_winners w
+           JOIN cartela_reservations r ON r.room_id = w.room_id
+             AND r.cartela_number = w.cartela_number
+             AND r.telegram_id = w.telegram_id AND r.status = 'ACTIVE'
+           WHERE w.room_id = ? AND w.telegram_id = ?`,
           [notification.room_id, notification.telegram_id],
         );
         if (!prizes.length || Number(stakeRow.cartela_count) === 0) {
@@ -2656,19 +2658,16 @@ async function deliverWinnerNotifications() {
           : minorUnitsToDecimal(netWinnings);
         const cartelas = prizes.map((item) => `#${Number(item.cartela_number)}`).join(', ');
         const message = [
-          `🎉 SHISHO BINGO — ${notification.first_name || 'Player'}, you won!`,
+          `🏆 BINGO! You won ${minorUnitsToDecimal(payout)} BIRR (stake ${formatAmount(stakeRow.stake)} + winnings ${formattedNetWinnings}) — it’s in your main wallet.`,
           `Room: #${notification.room_id}`,
           `Winning cartelas: ${cartelas}`,
-          `Stake: ${formatAmount(stakeRow.stake)} BIRR`,
-          `Prize received: ${minorUnitsToDecimal(payout)} BIRR`,
-          `Net winnings: ${formattedNetWinnings} BIRR`,
         ].join('\n');
         await telegramApi('sendMessage', {
           chat_id: String(notification.telegram_id),
           text: message,
           reply_markup: {
             inline_keyboard: [[{
-              text: '🎮 Play Again',
+              text: '🎮 Play Again · እንደገና ይጫወቱ',
               web_app: { url: config.appUrl },
             }]],
           },
@@ -2692,6 +2691,12 @@ async function deliverWinnerNotifications() {
   } finally {
     winnerNotificationPumpRunning = false;
   }
+}
+
+function kickWinnerNotificationPump() {
+  void deliverWinnerNotifications().catch((error) => {
+    console.error('[Winner notification pump failed]:', error);
+  });
 }
 
 async function roomClaimResults(executor, roomId) {
@@ -2748,6 +2753,7 @@ async function advanceRoomGame(roomId) {
         const winners = await roomWinnerResults(connection, roomId);
         await connection.commit();
         broadcastCartelaEvent(roomId, { type: 'GAME_FINISHED', roomId: String(roomId), status: 'FINISHED', winners });
+        kickWinnerNotificationPump();
         return;
       } else {
         await connection.execute(
@@ -2776,6 +2782,7 @@ async function advanceRoomGame(roomId) {
       const winners = await roomWinnerResults(connection, roomId);
       await connection.commit();
       broadcastCartelaEvent(roomId, { type: 'GAME_FINISHED', roomId: String(roomId), status: 'FINISHED', winners });
+      kickWinnerNotificationPump();
       return;
     }
     const interval = Number(process.env.BINGO_CALL_INTERVAL_SECONDS || 4);
@@ -3888,7 +3895,7 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
     await connection.execute(
       `UPDATE bingo_rooms
        SET status = 'VERIFYING',
-           claim_deadline = COALESCE(claim_deadline, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 2500 MICROSECOND))
+           claim_deadline = COALESCE(claim_deadline, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 2500000 MICROSECOND))
        WHERE id = ? AND status IN ('PLAYING', 'VERIFYING')`,
       [req.params.id],
     );
