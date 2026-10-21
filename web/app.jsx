@@ -150,6 +150,18 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+function Toast({ message, type = 'info', onClose }) {
+  useEffect(() => {
+    if (!message) return undefined;
+    const timer = window.setTimeout(onClose, 2500);
+    return () => window.clearTimeout(timer);
+  }, [message, onClose]);
+  if (!message) return null;
+  return <div key={message} className={`app-toast toast-${type}`} role="status" aria-live="polite">
+    <span>{message}</span>
+  </div>;
+}
+
 const words = {
   en: {
     play: 'Play', ranks: 'Ranks', history: 'History', profile: 'Profile', settings: 'Settings', welcome: 'Play. Win. Enjoy!',
@@ -174,7 +186,7 @@ const words = {
     recentActivity: 'RECENT ACTIVITY', noRecentGames: 'No recent games yet.',
     activityFooter: 'Live results — updates as rounds settle',
     recentWinnerInfo: 'Cartela #{cartelaNumber} won · Game #{gameId}',
-    bingo: '📣 BINGO!', claimingBingo: 'Verifying…', marked: 'MARKED',
+    bingo: '📣 BINGO!', claimingBingo: 'Sending…', marked: 'MARKED',
     roomMetrics: 'Room metrics', cartelaSelection: 'Choose a cartela', selectedCartelas: 'Selected cartela previews',
     cartela: 'Cartela', startingIn: 'STARTS IN',
     selectPreview: 'Select up to 2 cartelas to preview', roomSummary: 'Room summary',
@@ -243,7 +255,7 @@ const words = {
     recentActivity: 'የቅርብ ጊዜ እንቅስቃሴ', noRecentGames: 'በቅርቡ የተጠናቀቁ ጨዋታዎች የሉም።',
     activityFooter: 'የቀጥታ ውጤቶች — ዙሮች ሲጠናቀቁ ይዘምናሉ',
     recentWinnerInfo: 'ካርቴላ #{cartelaNumber} አሸንፏል · ጨዋታ #{gameId}',
-    bingo: '📣 ቢንጎ!', claimingBingo: 'በማረጋገጥ ላይ…', marked: 'ምልክት የተደረገባቸው',
+    bingo: '📣 ቢንጎ!', claimingBingo: 'በመላክ ላይ…', marked: 'ምልክት የተደረገባቸው',
     roomMetrics: 'የክፍል መረጃ', cartelaSelection: 'ካርቴላ ይምረጡ', selectedCartelas: 'የተመረጡ ካርቴላዎች',
     cartela: 'ካርቴላ', startingIn: 'ይጀምራል በ',
     selectPreview: 'ለማየት እስከ 2 ካርቴላ ይምረጡ', roomSummary: 'የክፍል ማጠቃለያ',
@@ -404,11 +416,16 @@ function App() {
   const [referral, setReferral] = useState(null);
   const [appInfo, setAppInfo] = useState(null);
   const [error, setError] = useState('');
+  const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [initData, setInitData] = useState('');
   const [telegramDiagnostic, setTelegramDiagnostic] = useState('');
   const [telegramChecked, setTelegramChecked] = useState(false);
 
+  const dismissToast = useCallback(() => setToast(null), []);
+  const notify = useCallback((message, type = 'info') => {
+    setToast({ message, type, id: Date.now() });
+  }, []);
   const request = useCallback((path, options) => api(path, { ...options, initData }), [initData]);
   const refreshWallet = useCallback(async () => {
     try {
@@ -523,12 +540,14 @@ function App() {
             status: result.status || 'VERIFYING',
             finishedAt: result.finishedAt ?? current.finishedAt,
             claimDeadline: result.claimDeadline ?? current.claimDeadline,
+            winnerAnnouncementAtMs: result.winnerAnnouncementAtMs ?? current.winnerAnnouncementAtMs,
           }
           : current);
         setGame((current) => current ? {
           ...current,
           status: result.status || 'VERIFYING',
           finishedAt: result.finishedAt ?? current.finishedAt,
+          winnerAnnouncementAtMs: result.winnerAnnouncementAtMs ?? current.winnerAnnouncementAtMs,
           calledNumbers: called,
           currentNumber: called.at(-1) ?? current.currentNumber,
           callIndex: called.length,
@@ -560,9 +579,7 @@ function App() {
             || !['PLAYING', 'VERIFYING'].includes(latest.room.status)) {
             setPendingBingoClaim(null);
             setView('game');
-            const telegram = telegramWebApp();
-            if (telegram?.showAlert) telegram.showAlert(reason.message || 'Bingo verification failed.');
-            else window.alert(reason.message || 'Bingo verification failed.');
+            notify(reason.message || 'Bingo claim failed.', 'error');
           }
         } catch (refreshError) {
           console.warn('[Bingo claim state refresh failed]:', refreshError);
@@ -879,8 +896,7 @@ function App() {
   }, [initData, refreshWallet]);
 
   useEffect(() => {
-    if (!room?.id || (!['cartelas', 'waiting', 'game'].includes(view)
-      && !(view === 'winner' && (pendingBingoClaim || room.status === 'VERIFYING')))) return undefined;
+    if (!room?.id || !['cartelas', 'waiting'].includes(view)) return undefined;
     let active = true;
     let timer = null;
     let inFlight = false;
@@ -945,7 +961,111 @@ function App() {
       active = false;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [room?.id, room?.status, view, pendingBingoClaim, request]);
+  }, [room?.id, room?.status, view, request]);
+
+  const activeGameView = view === 'game' || view === 'winner';
+  useEffect(() => {
+    if (!room?.id || !activeGameView || !initData) return undefined;
+    let active = true;
+    let controller;
+    let reconnectTimer;
+    const roomId = String(room.id);
+    const applyGameEvent = (data) => {
+      if (!active || String(roomId) !== String(room.id)) return;
+      const status = data.status || (data.type === 'WINNER_ANNOUNCED' ? 'FINISHED' : null);
+      const calledNumbers = Array.isArray(data.calledNumbers)
+        ? parseNumberList(data.calledNumbers)
+        : null;
+      const winners = Array.isArray(data.winners) ? data.winners : null;
+      const announcementAt = Number(data.winnerAnnouncementAtMs);
+      const isClaim = data.type === 'CLAIMS_UPDATED';
+      const isFinished = data.type === 'WINNER_ANNOUNCED' || status === 'FINISHED';
+      const shouldShowWinner = isClaim || isFinished || (status === 'VERIFYING' && winners?.length);
+
+      setGame((current) => {
+        const existingCalls = parseNumberList(current?.calledNumbers);
+        const nextCalls = calledNumbers && (calledNumbers.length >= existingCalls.length || isFinished)
+          ? calledNumbers
+          : existingCalls;
+        return {
+          ...(current || {}),
+          status: status || current?.status || 'PLAYING',
+          calledNumbers: nextCalls,
+          currentNumber: nextCalls.at(-1) ?? null,
+          callIndex: nextCalls.length,
+          winners: winners || current?.winners || [],
+          winnerAnnouncementAtMs: Number.isFinite(announcementAt) && announcementAt > 0
+            ? announcementAt
+            : current?.winnerAnnouncementAtMs,
+          finishedAt: Number(data.finishedAt) || current?.finishedAt,
+        };
+      });
+      setRoom((current) => {
+        if (!current || String(current.id) !== roomId) return current;
+        return {
+          ...current,
+          status: status || current.status,
+          pot: data.netPot ?? current.pot,
+          prizePool: data.totalPot ?? current.prizePool,
+          finishedAt: Number(data.finishedAt) || current.finishedAt,
+          claimDeadline: Number(data.claimDeadline) || current.claimDeadline,
+          winnerAnnouncementAtMs: Number.isFinite(announcementAt) && announcementAt > 0
+            ? announcementAt
+            : current.winnerAnnouncementAtMs,
+        };
+      });
+
+      if (isFinished) {
+        finishedRoomId.current = roomId;
+        setPendingBingoClaim(null);
+      } else if (isClaim) {
+        setPendingBingoClaim(null);
+      }
+      if (shouldShowWinner) setView('winner');
+      else if (status === 'PLAYING' && data.type !== 'GAME_SNAPSHOT') setView('game');
+    };
+    const connect = async () => {
+      controller = new AbortController();
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/game-stream`, {
+          headers: { Authorization: `tma ${initData}` },
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Game stream failed (${response.status}).`);
+        if (!response.body) throw new Error('Streaming responses are unavailable in this browser.');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (active) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const messages = buffer.split(/\r?\n\r?\n/);
+          buffer = messages.pop() || '';
+          for (const message of messages) {
+            const dataLines = message.split(/\r?\n/).filter((line) => line.startsWith('data:'));
+            if (!dataLines.length) continue;
+            try {
+              applyGameEvent(JSON.parse(dataLines.map((line) => line.slice(5).trim()).join('\n')));
+            } catch (error) {
+              console.warn('[Game stream event ignored]:', error);
+            }
+          }
+        }
+      } catch (error) {
+        if (active && error.name !== 'AbortError') console.warn('[Game stream reconnecting]:', error.message);
+      } finally {
+        if (active) reconnectTimer = window.setTimeout(connect, 1200);
+      }
+    };
+    void connect();
+    return () => {
+      active = false;
+      controller?.abort();
+      window.clearTimeout(reconnectTimer);
+    };
+  }, [room?.id, initData, activeGameView]);
 
   useEffect(() => {
     let active = true;
@@ -1236,9 +1356,9 @@ function App() {
 
     <main className="content">
       {view === 'play' && <PlayScreen t={t} rooms={rooms} myRoomId={myRoomId} roomsLoading={roomsLoading} onJoin={enterRoom} busy={busy} onRefresh={() => refreshRooms().catch((reason) => setError(reason.message))} />}
-      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
+      {view === 'cartelas' && room && <CartelaScreen key={room.id} room={room} t={t} busy={busy} loading={!roomReady} wallet={wallet} onToggle={toggleCard} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onNotify={notify} />}
       {view === 'waiting' && room && <WaitingRoomScreen room={room} t={t} busy={busy} onManage={() => setView('cartelas')} onBack={returnToLobby} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} />}
-      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} /></ErrorBoundary>}
+      {view === 'game' && room && <ErrorBoundary title="Game screen error"><GameScreen room={room} game={game} t={t} calledSet={calledSet} audioRef={callAudioRef} request={request} busy={busy} onLeave={leaveRoom} onRefresh={() => loadRoom(room.id)} onBingo={submitBingoClaim} onNotify={notify} /></ErrorBoundary>}
       {view === 'winner' && <WinnerScreen
         game={game}
         room={room}
@@ -1263,7 +1383,7 @@ function App() {
           setError(reason.message);
         }
       }} />}
-      {view === 'wallet' && <WalletScreen wallet={wallet} walletDetails={walletDetails} t={t} onRefresh={() => refreshWallet()} onError={setError} />}
+      {view === 'wallet' && <WalletScreen wallet={wallet} walletDetails={walletDetails} t={t} onRefresh={() => refreshWallet()} onError={setError} onNotify={notify} />}
     </main>
 
     {!['cartelas', 'waiting', 'game', 'winner'].includes(view) && <nav className="bottom-nav">
@@ -1273,6 +1393,7 @@ function App() {
         <span>{icon}</span>{label}
       </button>)}
     </nav>}
+    <Toast key={toast?.id} message={toast?.message} type={toast?.type} onClose={dismissToast} />
     <style>{styles}</style>
   </div>;
 }
@@ -1332,7 +1453,7 @@ function PlayScreen({ t, rooms, myRoomId, roomsLoading, onJoin, busy, onRefresh 
   </div>;
 }
 
-function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave, onRefresh = async () => {} }) {
+function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLeave, onRefresh = async () => {}, onNotify }) {
   const [clockNow, setClockNow] = useState(Date.now());
   const [overrides, setOverrides] = useState({});
   const [pending, setPending] = useState({});
@@ -1471,7 +1592,7 @@ function CartelaScreen({ room, t, busy, loading, wallet, onToggle, onBack, onLea
       });
       console.warn('[Cartela toggle failed, optimistic selection rolled back]:', error);
       const message = error.message || t.cartelaTakenAlert;
-      if (telegramWebApp()?.showAlert) telegramWebApp().showAlert(message);
+      if (onNotify) onNotify(message, 'error');
       else showNotice(message);
     }
   }
@@ -1550,7 +1671,7 @@ function WaitingRoomScreen({ room, t, busy, onManage, onBack, onLeave, onRefresh
   </>;
 }
 
-function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave, onRefresh, onBingo }) {
+function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave, onRefresh, onBingo, onNotify }) {
   const [autoMark, setAutoMark] = useState(true);
   const [isClaiming, setIsClaiming] = useState(false);
   const [recentWinners, setRecentWinners] = useState([]);
@@ -1724,9 +1845,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, request, busy, onLeave
       frozenNumbersRef.current = null;
       setClaimPaused(false);
       const message = error.message || 'Error claiming Bingo.';
-      const telegram = telegramWebApp();
-      if (telegram?.showAlert) telegram.showAlert(message);
-      else window.alert(message);
+      onNotify?.(message, 'error');
     } finally {
       claimInFlight.current = false;
       setIsClaiming(false);
@@ -1902,20 +2021,22 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
   const finishedAt = Number(room?.finishedAt ?? game?.finishedAt);
   const clientClockOffset = Number(game?.clientClockOffset) || 0;
   const isFinished = game?.status === 'FINISHED' || room?.status === 'FINISHED';
-  const resolvingClaims = !isFinished && (claimPending || (room?.status === 'VERIFYING' && winners.length > 0));
+  const winnerAnnouncementAtMs = Number(game?.winnerAnnouncementAtMs ?? room?.winnerAnnouncementAtMs);
   if (fallbackRoomId.current !== String(room?.id)) {
     fallbackRoomId.current = String(room?.id);
     fallbackDeadline.current = null;
   }
-  if ((claimPending || isFinished) && (!Number.isFinite(finishedAt) || finishedAt <= 0)
+  if ((claimPending || isFinished || winners.length > 0)
+    && (!Number.isFinite(winnerAnnouncementAtMs) || winnerAnnouncementAtMs <= 0)
+    && (!Number.isFinite(finishedAt) || finishedAt <= 0)
     && fallbackDeadline.current === null) {
     fallbackDeadline.current = Number(pendingWinner?.countdownDeadline) || Date.now() + 7000;
   }
-  const countdownDeadline = isFinished && Number.isFinite(finishedAt) && finishedAt > 0
-    ? finishedAt + 7000 - clientClockOffset
-    : isFinished && Number(room?.claimDeadline) > 0
-      ? Number(room.claimDeadline) - clientClockOffset
-      : (claimPending || isFinished) ? fallbackDeadline.current : null;
+  const countdownDeadline = Number.isFinite(winnerAnnouncementAtMs) && winnerAnnouncementAtMs > 0
+    ? winnerAnnouncementAtMs + 7000 - clientClockOffset
+    : Number.isFinite(finishedAt) && finishedAt > 0
+      ? finishedAt + 7000 - clientClockOffset
+      : (claimPending || winners.length > 0 || isFinished) ? fallbackDeadline.current : null;
   useEffect(() => { nextRoundRef.current = onNextRound; }, [onNextRound]);
   useEffect(() => {
     if (countdownDeadline === null) return undefined;
@@ -1924,7 +2045,7 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
       const remainingSeconds = Math.ceil(remainingMs / 1000);
       setSeconds(remainingSeconds);
       if (remainingMs === 0 && !claimPending
-        && (game?.status === 'FINISHED' || room?.status === 'FINISHED')
+        && (winners.length > 0 || game?.status === 'FINISHED' || room?.status === 'FINISHED')
         && !advanceStarted.current) {
         advanceStarted.current = true;
         nextRoundRef.current();
@@ -1934,11 +2055,12 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
     const timer = window.setInterval(update, 100);
     return () => window.clearInterval(timer);
   }, [claimPending, countdownDeadline, game?.status, room?.status, winners.length]);
-  return <section className={`winner-celebration ${claimPending ? 'optimistic-winner' : ''} ${winners.length ? 'has-winner' : ''}`}>
+  return <div className="winner-overlay" role="presentation">
+    <section className={`winner-dialog winner-celebration ${claimPending ? 'optimistic-winner' : ''} ${winners.length ? 'has-winner' : ''}`} role="dialog" aria-modal="true" aria-labelledby="winner-dialog-title">
     <div className="winner-glow" aria-hidden="true" />
     <div className="winner-trophy">{winners.length ? '👑' : '🎱'}</div>
     <div className="eyebrow">SHISHO BINGO · {t.roomNumber.replace('{number}', room?.roomNumber || room?.id || '—')}</div>
-    <h1>{winners.length ? t.winnerHeadline : t.gameOver}</h1>
+    <h1 id="winner-dialog-title">{winners.length ? t.winnerHeadline : t.gameOver}</h1>
     <p className="winner-subtitle">{winnerPlayerCount > 1 ? t.multiWinners.replace('{count}', winnerPlayerCount) : winnerPlayerCount ? t.singleWinner : t.noWinner}</p>
     {winners.length > 0 && <div className="winner-pot">{t.winnerPot.replace('{amount}', money(room?.pot ?? room?.prizePool))}</div>}
     {winners.length > 0 && <div className="winner-list">
@@ -1957,10 +2079,10 @@ function WinnerScreen({ game, room, t, claimPending = false, pendingWinner, onNe
         </span>)}
       </div>
     </section>}
-    {!resolvingClaims && winner && <div className="winner-verified">{t.verified}</div>}
-    {resolvingClaims && <p className="winner-countdown">{t.claimingBingo}</p>}
-    {!resolvingClaims && countdownDeadline !== null && <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>}
-  </section>;
+    {isFinished && winner && <div className="winner-verified">{t.verified}</div>}
+    {countdownDeadline !== null && <p className="winner-countdown">{t.nextRound.replace('{seconds}', seconds)}</p>}
+    </section>
+  </div>;
 }
 
 function RanksScreen({ ranks, t, userId }) {
@@ -2052,7 +2174,7 @@ function Stat({ label, value, icon, onClick }) {
   return <button type="button" className="stat" onClick={onClick}><span className="stat-icon">{icon}</span><small>{label}</small><b>{value}</b><span className="stat-link">↗</span></button>;
 }
 
-function WalletScreen({ wallet, walletDetails, t, onRefresh, onError }) {
+function WalletScreen({ wallet, walletDetails, t, onRefresh, onError, onNotify }) {
   const [methods, setMethods] = useState([]);
   const [method, setMethod] = useState('');
   const [amount, setAmount] = useState('');
@@ -2076,7 +2198,7 @@ function WalletScreen({ wallet, walletDetails, t, onRefresh, onError }) {
     const depositAmount = Number(amount);
     if (!Number.isFinite(depositAmount) || depositAmount < 20) {
       setStatus(t.minimumDepositError);
-      telegramWebApp()?.showAlert?.(t.minimumDepositError);
+      onNotify?.(t.minimumDepositError, 'error');
       return;
     }
     setBusy(true);
@@ -2553,6 +2675,16 @@ button,input,select{font:inherit}button{color:inherit;cursor:pointer}button:disa
 @media(max-width:370px){.play-screen .stake-entry-card{gap:10px;margin:0 2px;padding:12px}.stake-header-row{gap:7px}.stake-icon-badge{width:42px;height:42px;font-size:20px}.stake-info-text h3{font-size:15px!important}.stake-info-text small{font-size:9px}.btn-enter-game{min-height:38px;padding:8px 10px;font-size:11px}.stake-metrics-row{gap:5px}.stake-metrics-row .metric-box{min-height:66px}.stake-metrics-row .metric-value{font-size:11px}.stake-metrics-row .metric-label{font-size:7px}.play-screen .play-smart-pill{min-height:64px;padding:9px}.play-smart-pill h2{font-size:11px}.play-smart-pill p{font-size:9px}}
 .profile-dashboard{display:grid;gap:12px;padding-bottom:12px}.profile-dashboard>.page-title{margin:0 0 2px}.profile-hero{position:relative;overflow:hidden;display:grid;gap:14px;padding:16px;border-color:#654a8a;background:radial-gradient(ellipse at 100% 0,#533283 0,transparent 48%),linear-gradient(145deg,#211034,#120a20 72%)}.profile-identity{display:flex;align-items:center;gap:12px;min-width:0}.profile-identity .avatar{flex:none;width:58px;height:58px;border-color:#facc32;background:linear-gradient(145deg,#64439a,#2a1744);color:#ffe36a;box-shadow:0 0 18px #8b5cf644}.profile-name{flex:1;min-width:0}.profile-kicker{color:#c1a5ec;font-size:8px;font-weight:900;letter-spacing:.15em}.profile-name h2{overflow:hidden;margin:2px 0;color:#fff;font-size:18px;text-overflow:ellipsis;white-space:nowrap}.profile-name p{overflow:hidden;margin:0;color:#b9aaca;font-size:10px;text-overflow:ellipsis;white-space:nowrap}.profile-refresh{display:grid;place-items:center;flex:none;width:34px;height:34px;border:1px solid #664e81;border-radius:11px;background:#ffffff0c;color:#f0d773;font-size:20px;transition:transform .2s ease,background .2s ease}.profile-refresh:active{transform:rotate(35deg) scale(.94);background:#ffffff20}.profile-phone{margin-top:-8px;color:#baa9d0;font-size:10px}.profile-balance{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:12px;border:1px solid #66512b;border-radius:14px;background:linear-gradient(110deg,#2a2015,#1d1423);text-align:left}.profile-balance>span:first-child{display:grid;gap:2px}.profile-balance small{color:#c3b4a0;font-size:9px}.profile-balance b{color:#ffe36a;font-size:20px;font-variant-numeric:tabular-nums}.profile-balance-action{flex:none;padding:7px 9px;border-radius:9px;background:#facc32;color:#1c1302;font-size:10px;font-weight:900}.profile-wallet-breakdown,.wallet-balance-breakdown{display:grid;gap:7px;padding:10px 12px;border:1px solid #ffffff12;border-radius:12px;background:#10091b88}.profile-wallet-breakdown>div,.wallet-balance-breakdown>div{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#c6b7d8;font-size:10px}.profile-wallet-breakdown b,.wallet-balance-breakdown b{color:#f4e9ff;font-variant-numeric:tabular-nums}.profile-wallet-breakdown p,.wallet-balance-breakdown p{margin:0;color:#aa9cba;font-size:9px;line-height:1.4}.profile-winrate{display:grid;gap:6px}.profile-winrate>div:first-child{display:flex;justify-content:space-between;color:#bcaed0;font-size:10px}.profile-winrate b{color:#fff}.profile-progress{height:6px;overflow:hidden;border-radius:9px;background:#ffffff16}.profile-progress i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8b5cf6,#facc32);transition:width .5s ease}.profile-quick-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.profile-quick-actions button{display:grid;justify-items:center;gap:5px;min-width:0;padding:10px 4px;border:1px solid #433154;border-radius:12px;background:#ffffff08;color:#e8dff2;font-size:10px;font-weight:750;transition:transform .15s ease,border-color .15s ease,background .15s ease}.profile-quick-actions button:active{transform:scale(.96);border-color:#9875c4;background:#ffffff14}.profile-quick-actions button span{font-size:18px}.profile-dashboard>.profile-stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.profile-stats .stat{position:relative;display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;align-items:center;gap:4px 8px;min-width:0;padding:12px;border:1px solid #382848;border-radius:13px;background:linear-gradient(145deg,#1b1028,#120b1d);text-align:left;transition:transform .15s ease,border-color .15s ease}.profile-stats .stat:active{transform:translateY(1px);border-color:#8b5cf6}.profile-stats .stat-icon{grid-row:1 / span 2;font-size:20px}.profile-stats .stat small{overflow:hidden;grid-column:2 / span 2;font-size:9px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat b{overflow:hidden;grid-column:2;font-size:14px;text-overflow:ellipsis;white-space:nowrap}.profile-stats .stat-link{grid-column:3;grid-row:2;color:#a78bfa;font-size:12px}.profile-dashboard>.settings{border-color:#433154;background:linear-gradient(145deg,#1b1028,#120b1d)}.profile-dashboard .settings h2{margin:0 0 8px;font-size:15px}.profile-dashboard .language-control button{border:1px solid #49365c;border-radius:9px;background:#140b20;color:#cbbbdc;padding:7px 9px;font-size:10px}.profile-dashboard .language-control button.selected{border-color:#facc32;background:#332713;color:#ffe36a}
 @media(min-width:600px){.profile-dashboard{gap:14px}.profile-hero{padding:20px}.profile-dashboard>.profile-stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.app-toast{position:fixed;top:calc(env(safe-area-inset-top) + 12px);left:50%;z-index:9999;width:max-content;min-width:220px;max-width:88vw;padding:8px 15px;transform:translateX(-50%);border:1px solid #3b82f6;border-radius:20px;background:#2563eb;color:#fff;font-size:12px;font-weight:750;text-align:center;box-shadow:0 4px 16px #0008;pointer-events:none;animation:toast-in .2s ease-out}
+.app-toast.toast-error{border-color:#ef4444;background:#dc2626}.app-toast.toast-success{border-color:#10b981;background:#059669}
+@keyframes toast-in{from{opacity:0;transform:translate(-50%,-10px)}to{opacity:1;transform:translate(-50%,0)}}
+.winner-overlay{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;overflow-y:auto;padding:calc(14px + env(safe-area-inset-top)) 12px calc(14px + env(safe-area-inset-bottom));background:#07030fd9;backdrop-filter:blur(5px)}
+.winner-dialog{width:min(90vw,370px);max-height:92dvh;overflow-y:auto;gap:8px;padding:16px 13px;border:1px solid #f59e0b;border-radius:18px;background:#110826;box-shadow:0 18px 56px #000b}
+.winner-dialog .winner-trophy{font-size:42px}.winner-dialog h1{font-size:clamp(30px,10vw,44px)}.winner-dialog .winner-subtitle{font-size:12px}
+.winner-dialog .winner-list{max-height:112px;overflow-y:auto}.winner-dialog .winner-list>div{padding:6px 9px}
+.winner-dialog .winner-card-section{max-width:320px;padding:8px}.winner-dialog .winner-player-grid{grid-template-rows:repeat(6,minmax(20px,1fr));gap:3px}
+.winner-dialog .winner-player-grid>span{min-height:20px;font-size:10px}.winner-dialog .winner-player-grid>b{font-size:9px}
+@media(max-height:620px){.winner-overlay{align-items:start;padding-top:calc(8px + env(safe-area-inset-top))}.winner-dialog{max-height:96dvh;gap:5px;padding:10px}.winner-dialog .winner-trophy{font-size:32px}.winner-dialog .winner-card-section{padding:5px}.winner-dialog .winner-player-grid{grid-template-rows:repeat(6,minmax(16px,1fr))}.winner-dialog .winner-player-grid>span{min-height:16px}}
 `;
 
 createRoot(document.getElementById('root')).render(<ErrorBoundary><App /></ErrorBoundary>);

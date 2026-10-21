@@ -71,10 +71,11 @@ const pool = mysql.createPool({
   password: config.dbPassword,
   database: config.dbName,
   waitForConnections: true,
-  connectionLimit: Number(process.env.DATABASE_CONNECTION_LIMIT || 10),
+  connectionLimit: Number(process.env.DATABASE_CONNECTION_LIMIT || 40),
   queueLimit: 0,
   connectTimeout: 10000,
   enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
   ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
   decimalNumbers: false,
 });
@@ -97,7 +98,11 @@ const cartelaSyncAuthCache = new Map();
 const cartelaSyncAuthCacheTtlMs = 30000;
 const maxCartelaSyncAuthCacheEntries = 5000;
 const roomSSEClients = new Map();
+const gameSSEClients = new Map();
+const liveRoomMemory = new Map();
+const liveRoomMemoryLoads = new Map();
 let winnerNotificationPumpRunning = false;
+const BINGO_CLAIM_GRACE_MS = 2500;
 
 function broadcastCartelaEvent(roomId, eventData) {
   const clients = roomSSEClients.get(String(roomId));
@@ -120,6 +125,29 @@ function broadcastCartelaEvent(roomId, eventData) {
     }
   }
   if (clients.size === 0) roomSSEClients.delete(String(roomId));
+}
+
+function broadcastGameEvent(roomId, eventData) {
+  const clients = gameSSEClients.get(String(roomId));
+  if (!clients?.size) return;
+  const payload = `data: ${JSON.stringify(eventData)}\n\n`;
+  for (const response of clients) {
+    if (Array.isArray(response.gameEventsPending)) {
+      response.gameEventsPending.push(eventData);
+      continue;
+    }
+    if (response.destroyed || response.writableEnded) {
+      clients.delete(response);
+      continue;
+    }
+    try {
+      response.write(payload);
+    } catch (error) {
+      console.warn('[Game SSE broadcast failed]:', error.message);
+      clients.delete(response);
+    }
+  }
+  if (clients.size === 0) gameSSEClients.delete(String(roomId));
 }
 
 function getRoomCartelaCache(roomId) {
@@ -2721,6 +2749,116 @@ async function roomClaimResults(executor, roomId) {
   }));
 }
 
+async function getLiveRoomMemory(roomId) {
+  const key = String(roomId);
+  const cached = liveRoomMemory.get(key);
+  if (cached) return cached;
+  const loading = liveRoomMemoryLoads.get(key);
+  if (loading) return loading;
+
+  const pendingLoad = (async () => {
+    const [[room]] = await pool.execute(
+      `SELECT id, status, prize_pool, draw_order,
+         UNIX_TIMESTAMP(selection_deadline) * 1000 AS selection_ends_at_ms,
+         UNIX_TIMESTAMP(started_at) * 1000 AS started_at_ms,
+         UNIX_TIMESTAMP(finished_at) * 1000 AS finished_at_ms,
+         UNIX_TIMESTAMP(claim_deadline) * 1000 AS claim_deadline_ms
+       FROM bingo_rooms WHERE id = ?`,
+      [key],
+    );
+    if (!room) throw Object.assign(new Error('Room not found.'), { status: 404 });
+    const [calls] = await pool.execute(
+      'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
+      [key],
+    );
+    const [cartelas] = await pool.execute(
+      `SELECT cartela_number, owner_telegram_id FROM cartela_slots
+       WHERE room_id = ? AND owner_telegram_id IS NOT NULL`,
+      [key],
+    );
+    const calledNumbers = calls.map((call) => Number(call.number));
+    const winners = room.status === 'FINISHED' ? await roomWinnerResults(pool, key) : [];
+    const claimants = room.status === 'VERIFYING' ? await roomClaimResults(pool, key) : [];
+    const memory = {
+      id: key,
+      status: room.status,
+      prizePool: formatAmount(room.prize_pool),
+      selectionEndsAtMs: room.selection_ends_at_ms == null ? null : Number(room.selection_ends_at_ms),
+      startedAtMs: room.started_at_ms == null ? null : Number(room.started_at_ms),
+      finishedAtMs: room.finished_at_ms == null ? null : Number(room.finished_at_ms),
+      claimDeadlineMs: room.claim_deadline_ms == null ? null : Number(room.claim_deadline_ms),
+      winnerAnnouncementAtMs: room.claim_deadline_ms == null
+        ? null : Number(room.claim_deadline_ms) - BINGO_CLAIM_GRACE_MS,
+      drawOrder: room.draw_order == null ? [] : parseDrawOrder(room.draw_order, calledNumbers),
+      calledNumbers,
+      takenCartelas: new Map(cartelas.map((card) => [
+        Number(card.cartela_number),
+        String(card.owner_telegram_id),
+      ])),
+      claimants,
+      winners,
+    };
+    liveRoomMemory.set(key, memory);
+    return memory;
+  })();
+  liveRoomMemoryLoads.set(key, pendingLoad);
+  try {
+    return await pendingLoad;
+  } finally {
+    liveRoomMemoryLoads.delete(key);
+  }
+}
+
+function refreshLiveRoomMemory(roomId, updates) {
+  const memory = liveRoomMemory.get(String(roomId));
+  if (!memory) return null;
+  Object.assign(memory, updates);
+  return memory;
+}
+
+function roomGameSnapshot(memory) {
+  const totalPot = formatAmount(memory.prizePool || '0');
+  return {
+    type: 'GAME_SNAPSHOT',
+    status: memory.status,
+    calledNumbers: memory.calledNumbers,
+    winners: memory.status === 'FINISHED' ? memory.winners : memory.claimants,
+    totalPot,
+    netPot: minorUnitsToDecimal(decimalToMinorUnits(totalPot) * 80n / 100n),
+    finishedAt: memory.finishedAtMs,
+    winnerAnnouncementAtMs: memory.winnerAnnouncementAtMs,
+    claimDeadline: memory.claimDeadlineMs,
+  };
+}
+
+function announceFinishedRoom(roomId, { winners, prizePool, finishedAt, calledNumbers, winnerAnnouncementAtMs }) {
+  const grossPot = formatAmount(prizePool);
+  const netPot = minorUnitsToDecimal(decimalToMinorUnits(prizePool) * 80n / 100n);
+  const memory = refreshLiveRoomMemory(roomId, {
+    status: 'FINISHED',
+    winners,
+    claimants: [],
+    prizePool: grossPot,
+    finishedAtMs: finishedAt,
+    calledNumbers,
+    winnerAnnouncementAtMs,
+  });
+  const event = {
+    type: 'WINNER_ANNOUNCED',
+    status: 'FINISHED',
+    totalPot: grossPot,
+    netPot,
+    winners,
+    calledNumbers,
+    finishedAt,
+    winnerAnnouncementAtMs,
+    previewCartela: winners[0]?.cartelaNumber ?? null,
+  };
+  if (memory) broadcastGameEvent(roomId, event);
+  broadcastCartelaEvent(roomId, event);
+  kickWinnerNotificationPump();
+}
+
 async function roomFinishedAt(executor, roomId) {
   const [[result]] = await executor.execute(
     'SELECT UNIX_TIMESTAMP(finished_at) * 1000 AS finished_at_ms FROM bingo_rooms WHERE id = ?',
@@ -2733,7 +2871,11 @@ async function advanceRoomGame(roomId) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    const [rooms] = await connection.execute('SELECT * FROM bingo_rooms WHERE id = ? FOR UPDATE', [roomId]);
+    const [rooms] = await connection.execute(
+      `SELECT *, UNIX_TIMESTAMP(claim_deadline) * 1000 AS claim_deadline_ms
+       FROM bingo_rooms WHERE id = ? FOR UPDATE`,
+      [roomId],
+    );
     const room = rooms[0];
     if (!room || !['PLAYING', 'VERIFYING'].includes(room.status)) {
       await connection.commit();
@@ -2749,11 +2891,17 @@ async function advanceRoomGame(roomId) {
           'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
           [roomId],
         );
-        await settleRoom(connection, roomId, calls.map((call) => Number(call.number)));
+        const calledNumbers = calls.map((call) => Number(call.number));
+        await settleRoom(connection, roomId, calledNumbers);
         const winners = await roomWinnerResults(connection, roomId);
         await connection.commit();
-        broadcastCartelaEvent(roomId, { type: 'GAME_FINISHED', roomId: String(roomId), status: 'FINISHED', winners });
-        kickWinnerNotificationPump();
+        announceFinishedRoom(roomId, {
+          winners,
+          prizePool: room.prize_pool,
+          finishedAt: await roomFinishedAt(pool, roomId),
+          calledNumbers,
+          winnerAnnouncementAtMs: Number(room.claim_deadline_ms) - BINGO_CLAIM_GRACE_MS,
+        });
         return;
       } else {
         await connection.execute(
@@ -2778,11 +2926,19 @@ async function advanceRoomGame(roomId) {
         'SELECT number FROM game_calls WHERE room_id = ? ORDER BY draw_index',
         [roomId],
       );
-      await settleRoom(connection, roomId, calls.map((call) => Number(call.number)));
+      const calledNumbers = calls.map((call) => Number(call.number));
+      await settleRoom(connection, roomId, calledNumbers);
       const winners = await roomWinnerResults(connection, roomId);
       await connection.commit();
-      broadcastCartelaEvent(roomId, { type: 'GAME_FINISHED', roomId: String(roomId), status: 'FINISHED', winners });
-      kickWinnerNotificationPump();
+      const memory = liveRoomMemory.get(String(roomId));
+      announceFinishedRoom(roomId, {
+        winners,
+        prizePool: room.prize_pool,
+        finishedAt: await roomFinishedAt(pool, roomId),
+        calledNumbers,
+        winnerAnnouncementAtMs: memory?.winnerAnnouncementAtMs
+          ?? Number(room.claim_deadline_ms) - BINGO_CLAIM_GRACE_MS,
+      });
       return;
     }
     const interval = Number(process.env.BINGO_CALL_INTERVAL_SECONDS || 4);
@@ -2812,6 +2968,13 @@ async function advanceRoomGame(roomId) {
         [roomId],
       );
       await connection.commit();
+      announceFinishedRoom(roomId, {
+        winners: [],
+        prizePool: room.prize_pool,
+        finishedAt: await roomFinishedAt(pool, roomId),
+        calledNumbers,
+        winnerAnnouncementAtMs: Date.now(),
+      });
       return;
     }
     for (let drawIndex = calledNumbers.length; drawIndex < targetCallCount; drawIndex += 1) {
@@ -2832,6 +2995,29 @@ async function advanceRoomGame(roomId) {
       );
     }
     await connection.commit();
+    refreshLiveRoomMemory(roomId, {
+      status: calledNumbers.length === 75 ? 'FINISHED' : 'PLAYING',
+      prizePool: formatAmount(room.prize_pool),
+      drawOrder,
+      calledNumbers,
+    });
+    if (calledNumbers.length > calls.length) {
+      broadcastGameEvent(roomId, {
+        type: 'GAME_UPDATE',
+        status: calledNumbers.length === 75 ? 'FINISHED' : 'PLAYING',
+        calledNumbers,
+        callIndex: calledNumbers.length,
+      });
+    }
+    if (calledNumbers.length === 75) {
+      announceFinishedRoom(roomId, {
+        winners: [],
+        prizePool: room.prize_pool,
+        finishedAt: await roomFinishedAt(pool, roomId),
+        calledNumbers,
+        winnerAnnouncementAtMs: Date.now(),
+      });
+    }
   } catch (error) {
     await connection.rollback();
     throw error;
@@ -2866,6 +3052,23 @@ async function startDueRoom(roomId) {
       await connection.commit();
       releaseRoomCartelaCache(roomId);
       broadcastCartelaEvent(roomId, { type: 'GAME_STARTED', roomId: String(roomId) });
+      const memory = refreshLiveRoomMemory(roomId, {
+        status: 'PLAYING',
+        drawOrder,
+        calledNumbers: [],
+        claimants: [],
+        winners: [],
+        startedAtMs: Date.now(),
+      });
+      if (memory) {
+        broadcastGameEvent(roomId, {
+          type: 'GAME_UPDATE',
+          status: 'PLAYING',
+          calledNumbers: [],
+          callIndex: 0,
+          startedAt: memory.startedAtMs,
+        });
+      }
       return 'started';
     }
 
@@ -2910,6 +3113,19 @@ async function startDueRooms() {
      WHERE status = 'VERIFYING' AND claim_deadline <= CURRENT_TIMESTAMP(3)
      ORDER BY claim_deadline ASC LIMIT 100`,
   );
+  const configuredInterval = Number(process.env.BINGO_CALL_INTERVAL_SECONDS || 4);
+  const intervalMicros = Number.isInteger(configuredInterval) && configuredInterval >= 1 && configuredInterval <= 3600
+    ? configuredInterval * 1000000
+    : 0;
+  const [playingRooms] = intervalMicros
+    ? await pool.execute(
+      `SELECT id FROM bingo_rooms
+       WHERE status = 'PLAYING'
+         AND TIMESTAMPDIFF(MICROSECOND, COALESCE(last_call_at, started_at), CURRENT_TIMESTAMP(3)) >= ?
+       ORDER BY last_call_at ASC LIMIT 100`,
+      [intervalMicros],
+    )
+    : [[], []];
   const results = { started: [], reopened: 0 };
   for (const { id } of rooms) {
     const outcome = await startDueRoom(id);
@@ -2924,9 +3140,9 @@ async function startDueRooms() {
   for (const { id } of verifyingRooms) {
     await advanceRoomGame(String(id));
   }
-  void deliverWinnerNotifications().catch((error) => {
-    console.error('[Winner notification pump failed]:', error);
-  });
+  for (const { id } of playingRooms) {
+    await advanceRoomGame(String(id));
+  }
   return results;
 }
 
@@ -3290,6 +3506,55 @@ app.get('/api/rooms/:id/cartelas-stream', authenticatedCartelaSyncUser, async (r
   } catch (error) {
     if (res.headersSent) {
       console.error('[Cartela SSE stream failed]:', error);
+      res.end();
+      return;
+    }
+    next(error);
+  }
+});
+
+app.get('/api/rooms/:id/game-stream', authenticatedCartelaSyncUser, async (req, res, next) => {
+  let heartbeat;
+  try {
+    await initializeSchema();
+    const roomId = String(req.params.id);
+    res.set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+
+    let clients = gameSSEClients.get(roomId);
+    if (!clients) {
+      clients = new Set();
+      gameSSEClients.set(roomId, clients);
+    }
+    clients.add(res);
+    res.gameEventsPending = [];
+    res.on('close', () => {
+      clearInterval(heartbeat);
+      const activeClients = gameSSEClients.get(roomId);
+      activeClients?.delete(res);
+      if (activeClients?.size === 0) gameSSEClients.delete(roomId);
+    });
+
+    const memory = await getLiveRoomMemory(roomId);
+    if (res.destroyed || res.writableEnded) return;
+    res.write(`data: ${JSON.stringify(roomGameSnapshot(memory))}\n\n`);
+    const pendingEvents = res.gameEventsPending;
+    res.gameEventsPending = null;
+    for (const event of pendingEvents) {
+      if (res.destroyed || res.writableEnded) break;
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+    heartbeat = setInterval(() => {
+      if (!res.destroyed && !res.writableEnded) res.write(': heartbeat\n\n');
+    }, 20000);
+  } catch (error) {
+    if (res.headersSent) {
+      console.error('[Game SSE stream failed]:', error);
       res.end();
       return;
     }
@@ -3905,7 +4170,24 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
        FROM bingo_rooms WHERE id = ?`,
       [req.params.id],
     );
+    const claimDeadline = Number(claimWindow.claim_deadline_ms);
+    const winnerAnnouncementAtMs = claimDeadline - BINGO_CLAIM_GRACE_MS;
     await connection.commit();
+    refreshLiveRoomMemory(req.params.id, {
+      status: 'VERIFYING',
+      calledNumbers,
+      claimants: winners,
+      claimDeadlineMs: claimDeadline,
+      winnerAnnouncementAtMs,
+    });
+    broadcastGameEvent(req.params.id, {
+      type: 'CLAIMS_UPDATED',
+      status: 'VERIFYING',
+      winners,
+      calledNumbers,
+      claimDeadline,
+      winnerAnnouncementAtMs,
+    });
     res.json({
       success: true,
       bingo: true,
@@ -3914,7 +4196,8 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
       winner: winners[0] || null,
       winners,
       calledNumbers,
-      claimDeadline: Number(claimWindow.claim_deadline_ms),
+      claimDeadline,
+      winnerAnnouncementAtMs,
     });
   } catch (error) {
     await connection.rollback().catch(() => {});
@@ -5015,6 +5298,11 @@ if (require.main === module) {
     const lifecycleTicker = setInterval(runLifecycleTick, 500);
     lifecycleTicker.unref();
     void runLifecycleTick();
+    const notificationTicker = setInterval(() => {
+      kickWinnerNotificationPump();
+    }, 15000);
+    notificationTicker.unref();
+    kickWinnerNotificationPump();
     app.listen(port, () => console.log(`SHISHO BINGO listening on port ${port}`));
   }).catch((error) => {
     console.error('Could not initialize the database:', error.message);
