@@ -3690,6 +3690,11 @@ app.post('/api/rooms/:id/join', authenticatedTelegramUser, async (req, res, next
 async function getRoomState(req, res, next) {
   try {
     await initializeSchema();
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, private',
+      Pragma: 'no-cache',
+      Expires: '0',
+    });
     await startDueRoom(req.params.id);
     await advanceRoomGame(req.params.id);
     const [[room]] = await pool.execute('SELECT status FROM bingo_rooms WHERE id = ?', [req.params.id]);
@@ -4252,12 +4257,16 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
       winnerAnnouncementAtMs,
     });
     broadcastGameEvent(req.params.id, {
-      type: 'CLAIMS_UPDATED',
+      type: 'GAME_HALTED',
       status: 'VERIFYING',
+      message: 'ቢንጎ ተብሏል! / Bingo claimed!',
       winners,
       calledNumbers,
       claimDeadline,
       winnerAnnouncementAtMs,
+      totalPot: formatAmount(room.prize_pool),
+      netPot: minorUnitsToDecimal(decimalToMinorUnits(room.prize_pool) * 80n / 100n),
+      previewCartela: winners[0]?.cartelaNumber ?? null,
     });
     res.json({
       success: true,

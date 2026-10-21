@@ -917,7 +917,7 @@ function App() {
   }, [initData, refreshWallet]);
 
   useEffect(() => {
-    if (!room?.id || !['cartelas', 'waiting'].includes(view)) return undefined;
+    if (!room?.id || !['cartelas', 'waiting', 'game', 'winner'].includes(view)) return undefined;
     let active = true;
     let timer = null;
     let inFlight = false;
@@ -976,7 +976,7 @@ function App() {
         if (active) console.warn('[Polling tick skipped]:', reason);
       } finally {
         inFlight = false;
-        if (active) timer = window.setTimeout(update, 750);
+        if (active) timer = window.setTimeout(update, ['game', 'winner'].includes(view) ? 800 : 750);
       }
     };
     void update();
@@ -1002,7 +1002,7 @@ function App() {
         : null;
       const winners = Array.isArray(data.winners) ? data.winners : null;
       const announcementAt = Number(data.winnerAnnouncementAtMs);
-      const isClaim = data.type === 'CLAIMS_UPDATED';
+      const isClaim = data.type === 'CLAIMS_UPDATED' || data.type === 'GAME_HALTED';
       const isGameStarted = data.type === 'GAME_STARTED';
       const hasWinners = Boolean(winners?.length);
       const isFinished = data.type === 'WINNER_ANNOUNCED'
