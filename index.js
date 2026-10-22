@@ -1137,23 +1137,19 @@ function parseTelebirrProof(input = '') {
   };
 }
 
-function getDepositInstructionMessage(amount = null, lang = 'en') {
-  const formattedAmount = amount ? `${formatAmount(amount)} BIRR` : 'your chosen amount';
-  const amharicAmount = amount ? `${formatAmount(amount)} ብር` : 'የመረጡትን መጠን';
-  const localized = lang === 'am'
-    ? `💵 የገንዘብ ማስገቢያ · Deposit\n\n` +
-      `ቢያንስ ${minimumDeposit} ብር ወደ ዚህ ቴሌብር ሂሳብ ይላኩ፦\n` +
-      `📱 ስልክ: ${DEPOSIT_CONFIG.telebirrPhone}\n` +
-      `👤 የሂሳብ ስም: ${DEPOSIT_CONFIG.telebirrName}\n\n` +
-      `ከከፈሉ በኋላ የሚከፈለውን መጠን (${amharicAmount}) ያስገቡ፤ ከዚያም የግብይት ሊንኩን ወይም ሙሉውን የSMS መልዕክት እዚህ ይላኩ።\n\n` +
-      `ጥያቄው በአስተዳዳሪ ከተረጋገጠ በኋላ ብቻ ሂሳብዎ ገቢ ይደረጋል።`
-    : `💵 Deposit · የገንዘብ ማስገቢያ\n\n` +
-      `Send at least ${minimumDeposit} BIRR to this Telebirr account:\n` +
-      `📱 Phone / ስልክ: ${DEPOSIT_CONFIG.telebirrPhone}\n` +
-      `👤 Account name / የሂሳብ ስም: ${DEPOSIT_CONFIG.telebirrName}\n\n` +
-      `After payment, enter the exact amount (${formattedAmount}), then send either the transaction link from your SMS or the full SMS text here.\n\n` +
-      `Your wallet is credited only after an administrator verifies the payment.`;
-  return localized;
+function getDepositInstructionMessage(amount) {
+  const formattedAmount = formatAmount(amount);
+  return `💵 *Deposit · ገቢ*\n\n` +
+    `Send *${formattedAmount} BIRR* to Telebirr: \`${DEPOSIT_CONFIG.telebirrPhone}\` (*${DEPOSIT_CONFIG.telebirrName}*)\n` +
+    `ወደ ቴሌብር *${formattedAmount} ብር* ይላኩ፦ \`${DEPOSIT_CONFIG.telebirrPhone}\` (*${DEPOSIT_CONFIG.telebirrName}*)\n\n` +
+    `*After sending, paste either:*\n` +
+    `▪️ The transaction link from your SMS\n` +
+    `▪️ The whole SMS message\n\n` +
+    `*ከላኩ በኋላ የሚከተሉትን እዚህ ይላኩ፦*\n` +
+    `▪️ ከአጭር የጽሁፍ መልዕክት (SMS) ያገኙትን የትራንዛክሽን ሊንክ\n` +
+    `▪️ ሙሉውን የቴሌብር SMS መልዕክት\n\n` +
+    `_Your proof will be reviewed, and your balance credited after verification._\n` +
+    `_ማስረጃው ከተረጋገጠ በኋላ ቀሪ ሂሳብዎ ገቢ ይደረጋል።_`;
 }
 
 function formatAmount(value) {
@@ -1932,20 +1928,85 @@ function walletActionsKeyboard(lang) {
   };
 }
 
-async function sendDepositChoices(chatId, lang) {
+function depositAmountKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '50 BIRR · 50 ብር', callback_data: 'deposit:amount:50' },
+        { text: '100 BIRR · 100 ብር', callback_data: 'deposit:amount:100' },
+      ],
+      [
+        { text: '200 BIRR · 200 ብር', callback_data: 'deposit:amount:200' },
+        { text: '500 BIRR · 500 ብር', callback_data: 'deposit:amount:500' },
+      ],
+      [{ text: '❌ Cancel · ሰርዝ', callback_data: 'deposit:cancel' }],
+    ],
+  };
+}
+
+function depositPaymentKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: '📋 ስልክ ኮፒ · Copy Phone', copy_text: { text: DEPOSIT_CONFIG.telebirrPhone } }],
+      [
+        { text: '🔄 Change Amount · መጠን ቀይር', callback_data: 'deposit:change' },
+        { text: '❌ Cancel · ሰርዝ', callback_data: 'deposit:cancel' },
+      ],
+    ],
+  };
+}
+
+async function sendDepositAmountPrompt(chatId, telegramId, lang, messageId) {
   if (!config.paymentMethods.length) {
     return telegramApi('sendMessage', { chat_id: chatId, text: text[lang].depositDisabled });
   }
+  const method = config.paymentMethods.find((item) => item.method === 'TELEBIRR');
+  if (!method) return telegramApi('sendMessage', { chat_id: chatId, text: text[lang].depositDisabled });
+  await setUserFlow(telegramId, 'deposit', 'amount', { method: method.method });
+  const prompt = `💳 *How much would you like to deposit?*\n` +
+    `_(Minimum deposit amount is ${minimumDeposit} BIRR)_\n\n` +
+    `*ምን ያህል ብር ማስገባት ይፈልጋሉ?*\n` +
+    `_(ዝቅተኛው የማስገቢያ መጠን ${minimumDeposit} ብር ነው)_\n\n` +
+    `_Or type a custom amount / ወይም ሌላ መጠን ይጻፉ_`;
+  if (messageId) {
+    try {
+      return await telegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: messageId,
+        text: prompt,
+        parse_mode: 'Markdown',
+        reply_markup: depositAmountKeyboard(),
+      });
+    } catch (error) {
+      console.warn('Could not edit deposit amount prompt; sending a new message:', error.message);
+    }
+  }
   return telegramApi('sendMessage', {
     chat_id: chatId,
-    text: `${text[lang].choosePaymentMethod}\n\n${getDepositInstructionMessage(null, lang)}`,
-    reply_markup: {
-      inline_keyboard: config.paymentMethods.map((method) => [{
-        text: method.label,
-        callback_data: `deposit:method:${method.method}`,
-      }]).concat([[{ text: '❌ Cancel', callback_data: 'flow:cancel' }]]),
-    },
+    text: prompt,
+    parse_mode: 'Markdown',
+    reply_markup: depositAmountKeyboard(),
   });
+}
+
+async function sendDepositPaymentInstructions(chatId, telegramId, lang, amount, messageId) {
+  const method = config.paymentMethods.find((item) => item.method === 'TELEBIRR');
+  if (!method) return telegramApi('sendMessage', { chat_id: chatId, text: text[lang].depositDisabled });
+  await setUserFlow(telegramId, 'deposit', 'reference', { method: method.method, amount });
+  const options = {
+    chat_id: chatId,
+    text: getDepositInstructionMessage(amount, lang),
+    parse_mode: 'Markdown',
+    reply_markup: depositPaymentKeyboard(),
+  };
+  if (messageId) {
+    try {
+      return await telegramApi('editMessageText', { ...options, message_id: messageId });
+    } catch (error) {
+      console.warn('Could not edit deposit payment card; sending a new message:', error.message);
+    }
+  }
+  return telegramApi('sendMessage', options);
 }
 
 async function beginWithdrawal(chatId, telegramId, lang) {
@@ -2182,11 +2243,7 @@ async function handleUserFlow(message, user, lang) {
       });
       return true;
     }
-    await setUserFlow(user.id, 'deposit', 'reference', { method: flow.data.method, amount });
-    await telegramApi('sendMessage', {
-      chat_id: message.chat.id,
-      text: `${getDepositInstructionMessage(amount, lang)}\n\n${text[lang].enterDepositReference}`,
-    });
+    await sendDepositPaymentInstructions(message.chat.id, user.id, lang, amount);
     return true;
   }
   if (flow.flow === 'deposit' && flow.step === 'reference') {
@@ -4807,11 +4864,38 @@ app.post('/telegram/webhook', async (req, res, next) => {
         const lang = languageOf(savedUser?.language);
         const depositReview = /^deposit:(approve|reject):(\d+)$/.exec(data);
         const withdrawalReview = /^withdraw:(approve|reject):(\d+)$/.exec(data);
+        const depositAmount = /^deposit:amount:(\d+(?:\.\d{1,2})?)$/.exec(data);
         const depositMethod = /^deposit:method:(TELEBIRR)$/.exec(data);
         const withdrawalMethod = /^withdraw:method:(TELEBIRR)$/.exec(data);
         const supportTopic = /^help:(deposits|withdrawals|wallet|cartela|rules|technical)$/.exec(data);
 
-        if (depositMethod) {
+        if (depositAmount) {
+          const amount = validDepositAmount(depositAmount[1]);
+          if (!amount || decimalToMinorUnits(amount) < decimalToMinorUnits(minimumDeposit)) {
+            await telegramApi('answerCallbackQuery', {
+              callback_query_id: callback.id,
+              text: text[lang].invalidAmount,
+              show_alert: true,
+            });
+            return res.sendStatus(200);
+          }
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await sendDepositPaymentInstructions(
+            callback.message.chat.id,
+            user.id,
+            lang,
+            amount,
+            callback.message.message_id,
+          );
+        } else if (data === 'deposit:change') {
+          await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
+          await sendDepositAmountPrompt(
+            callback.message.chat.id,
+            user.id,
+            lang,
+            callback.message.message_id,
+          );
+        } else if (depositMethod) {
           const option = config.paymentMethods.find((item) => item.method === depositMethod[1]);
           if (!option) {
             await telegramApi('answerCallbackQuery', {
@@ -4821,15 +4905,13 @@ app.post('/telegram/webhook', async (req, res, next) => {
             });
             return res.sendStatus(200);
           }
-          await setUserFlow(user.id, 'deposit', 'amount', { method: option.method });
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
-          await telegramApi('sendMessage', {
-            chat_id: callback.message.chat.id,
-            text: `${getDepositInstructionMessage(null, lang)}\n\n${text[lang].enterDepositAmount}`,
-            reply_markup: {
-              inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'flow:cancel' }]],
-            },
-          });
+          await sendDepositAmountPrompt(
+            callback.message.chat.id,
+            user.id,
+            lang,
+            callback.message.message_id,
+          );
         } else if (withdrawalMethod) {
           const flow = await getUserFlow(user.id);
           if (flow?.flow !== 'withdrawal' || flow.step !== 'method') {
@@ -4845,7 +4927,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
               inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'withdraw:cancel' }]],
             },
           });
-        } else if (data === 'flow:cancel' || data === 'withdraw:cancel') {
+        } else if (data === 'flow:cancel' || data === 'withdraw:cancel' || data === 'deposit:cancel') {
           await clearUserFlow(user.id);
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id, text: text[lang].cancelled });
           await telegramApi('sendMessage', {
@@ -4906,7 +4988,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           });
         } else if (data === 'wallet:deposit') {
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
-          await sendDepositChoices(callback.message.chat.id, lang);
+          await sendDepositAmountPrompt(callback.message.chat.id, user.id, lang);
         } else if (data === 'wallet:withdraw') {
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
           await beginWithdrawal(callback.message.chat.id, user.id, lang);
@@ -5075,7 +5157,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
     } else if (menuAction === 'profile') {
       await sendProfile(message.chat.id, user.id, lang);
     } else if (menuAction === 'deposit') {
-      await sendDepositChoices(message.chat.id, lang);
+      await sendDepositAmountPrompt(message.chat.id, user.id, lang);
     } else if (menuAction === 'withdraw') {
       await beginWithdrawal(message.chat.id, user.id, lang);
     } else if (menuAction === 'invite') {
