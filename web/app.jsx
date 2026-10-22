@@ -529,9 +529,7 @@ function App() {
     if (data.wallet?.availableBalance !== undefined) {
       setWallet(data.wallet.availableBalance);
     }
-    const hasPendingWinner = data.room.status === 'VERIFYING'
-      && (data.winners?.length || data.game?.winners?.length);
-    setView(data.room.status === 'FINISHED' || hasPendingWinner
+    setView(data.room.status === 'FINISHED'
       ? 'winner'
       : ['PLAYING', 'VERIFYING'].includes(data.room.status) ? 'game' : 'cartelas');
     return data;
@@ -1002,8 +1000,6 @@ function App() {
         const callIndex = Number(data.game?.callIndex) || 0;
         const hasWinners = (data.winners?.length || 0) > 0 || (data.game?.winners?.length || 0) > 0;
         const isFinished = isFinishedStatus && (hasWinners || callIndex >= 75);
-        const hasPendingWinner = data.room.status === 'VERIFYING'
-          && (data.winners?.length || data.game?.winners?.length);
         if (['VERIFYING', 'FINISHED'].includes(data.room.status)) {
           frozenGameRoomId.current = roomId;
           const audio = callAudioRef.current;
@@ -1011,7 +1007,7 @@ function App() {
           if (audio) audio.currentTime = 0;
           window.speechSynthesis?.cancel();
         }
-        const shouldShowWinner = isFinished || Boolean(hasPendingWinner);
+        const shouldShowWinner = isFinished;
         if (claimRequestInFlight.current && !shouldShowWinner) return;
         if (finishedRoomId.current === roomId && !isFinished) return;
         if (!isFinished && lastGameCall.current.roomId === roomId
@@ -1088,7 +1084,7 @@ function App() {
       const isFinished = data.type === 'WINNER_ANNOUNCED'
         ? hasWinners || calledNumbers?.length >= 75
         : status === 'FINISHED' && (hasWinners || calledNumbers?.length >= 75);
-      const shouldShowWinner = isClaim || isFinished || (status === 'VERIFYING' && winners?.length);
+      const shouldShowWinner = isFinished;
       const startTimeMs = Number(data.startTimeMs ?? data.startedAt);
       const serverTime = Number(data.serverTime);
       const clientClockOffset = Number.isFinite(serverTime) ? serverTime - eventReceivedAt : null;
@@ -1148,7 +1144,8 @@ function App() {
         setPendingBingoClaim(null);
       }
       if (shouldShowWinner) setView('winner');
-      else if (isGameStarted || (status === 'PLAYING' && data.type !== 'GAME_SNAPSHOT')) setView('game');
+      else if (isGameStarted || (['PLAYING', 'VERIFYING'].includes(status)
+        && data.type !== 'GAME_SNAPSHOT' && !claimRequestInFlight.current)) setView('game');
     };
     const connect = async () => {
       controller = new AbortController();
@@ -1321,9 +1318,7 @@ function App() {
       if (!data.spectator && data.room.status !== 'FINISHED') setMyRoomId(String(data.room.id));
       const hasCartelas = Array.isArray(data.room.cartelas)
         && data.room.cartelas.some((card) => card.state === 'MINE');
-      const hasPendingWinner = data.room.status === 'VERIFYING'
-        && (data.winners?.length || data.game?.winners?.length);
-      if (data.room.status === 'FINISHED' || hasPendingWinner) {
+      if (data.room.status === 'FINISHED') {
         setView('winner');
       } else if (['PLAYING', 'VERIFYING'].includes(data.room.status)) {
         setView('game');
@@ -2029,7 +2024,8 @@ function GameScreen({ room, game, t, calledSet, audioRef, frozenGameRoomId, requ
     });
   };
   const handleBingoClaim = async () => {
-    if (!isBingoReady || !claimableCards.length || isClaiming || claimInFlight.current) return;
+    if (!['PLAYING', 'VERIFYING'].includes(room.status)
+      || !isBingoReady || !claimableCards.length || isClaiming || claimInFlight.current) return;
     claimInFlight.current = true;
     setIsClaiming(true);
     frozenNumbersRef.current = displayedNumbers;
@@ -2137,7 +2133,7 @@ function GameScreen({ room, game, t, calledSet, audioRef, frozenGameRoomId, requ
           </div>}
         {!isSpectator && <button
           className={`btn-bingo btn-bingo-action ${isBingoReady ? 'active-yellow' : ''}`}
-          disabled={busy || isClaiming || room.status === 'VERIFYING' || !isBingoReady}
+          disabled={busy || isClaiming || !['PLAYING', 'VERIFYING'].includes(room.status) || !isBingoReady}
           onClick={handleBingoClaim}
         >{isClaiming || room.status === 'VERIFYING' ? t.claimingBingo : t.bingo}</button>}
       </section>

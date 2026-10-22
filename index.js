@@ -103,7 +103,7 @@ const gameSSEClients = new Map();
 const liveRoomMemory = new Map();
 const liveRoomMemoryLoads = new Map();
 let winnerNotificationPumpRunning = false;
-const BINGO_CLAIM_GRACE_MS = 2500;
+const BINGO_CLAIM_GRACE_MS = 1500;
 const BINGO_FINAL_CLAIM_GRACE_MS = 5000;
 
 function broadcastCartelaEvent(roomId, eventData) {
@@ -2576,6 +2576,7 @@ async function settleRoom(connection, roomId, calledNumbers) {
     `SELECT c.telegram_id, c.cartela_number, s.numbers
      FROM game_claims c
      JOIN cartela_slots s ON s.room_id = c.room_id AND s.cartela_number = c.cartela_number
+       AND s.owner_telegram_id = c.telegram_id
      JOIN cartela_reservations r ON r.room_id = c.room_id
        AND r.cartela_number = c.cartela_number AND r.telegram_id = c.telegram_id
        AND r.status = 'ACTIVE'
@@ -2755,6 +2756,10 @@ async function roomClaimResults(executor, roomId) {
      FROM game_claims c
      JOIN users u ON u.telegram_id = c.telegram_id
      JOIN cartela_slots s ON s.room_id = c.room_id AND s.cartela_number = c.cartela_number
+       AND s.owner_telegram_id = c.telegram_id
+     JOIN cartela_reservations r ON r.room_id = c.room_id
+       AND r.cartela_number = c.cartela_number AND r.telegram_id = c.telegram_id
+       AND r.status = 'ACTIVE'
      WHERE c.room_id = ?
      ORDER BY c.id`,
     [roomId],
@@ -4210,6 +4215,18 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
     if (!['PLAYING', 'VERIFYING'].includes(room.status)) {
       throw Object.assign(new Error('This game is no longer accepting Bingo claims.'), { status: 409, code: 'GAME_NOT_PLAYING' });
     }
+    if (room.status === 'VERIFYING' && room.claim_deadline) {
+      const [[claimWindow]] = await connection.execute(
+        'SELECT claim_deadline > CURRENT_TIMESTAMP(3) AS is_open FROM bingo_rooms WHERE id = ?',
+        [req.params.id],
+      );
+      if (!Number(claimWindow.is_open)) {
+        throw Object.assign(new Error('The simultaneous Bingo claim window has closed.'), {
+          status: 409,
+          code: 'CLAIM_WINDOW_CLOSED',
+        });
+      }
+    }
     const [cards] = await connection.execute(
       `SELECT s.cartela_number, s.numbers
        FROM cartela_slots s
@@ -4251,7 +4268,7 @@ app.post('/api/rooms/:id/bingo', authenticatedTelegramUser, async (req, res, nex
     await connection.execute(
       `UPDATE bingo_rooms
        SET status = 'VERIFYING',
-           claim_deadline = COALESCE(claim_deadline, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 2500000 MICROSECOND))
+           claim_deadline = COALESCE(claim_deadline, DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL ${BINGO_CLAIM_GRACE_MS * 1000} MICROSECOND))
        WHERE id = ? AND status IN ('PLAYING', 'VERIFYING')`,
       [req.params.id],
     );
