@@ -92,6 +92,11 @@ function getNextSelectionEndTime() {
 }
 const officialChannelUrl = 'https://t.me/+D2i3HE1qVKk4NDU8';
 const minimumDeposit = '20.00';
+const DEPOSIT_CONFIG = {
+  telebirrPhone: config.paymentMethods.find((item) => item.method === 'TELEBIRR')?.account || '0990957900',
+  telebirrName: config.paymentMethods.find((item) => item.method === 'TELEBIRR')?.accountName || 'Shewaye Shetarage',
+  minimumAmount: minimumDeposit,
+};
 const supportUrl = config.supportUrl || `https://t.me/${config.supportUsername}`;
 const activeRoomCartelaCache = new Map();
 const roomCartelaCacheWarmups = new Map();
@@ -1082,6 +1087,75 @@ function validDepositAmount(value) {
   }
 }
 
+function parseTelebirrProof(input = '') {
+  const proof = String(input).trim().slice(0, 4096);
+  if (!proof) return { txId: null, amount: null };
+
+  let txId = null;
+  const urlMatch = proof.match(/https?:\/\/[^\s<>"']+/i);
+  if (urlMatch) {
+    try {
+      const url = new URL(urlMatch[0].replace(/[),.;]+$/, ''));
+      const isTelebirrUrl = url.hostname === 'telebirr.et' || url.hostname.endsWith('.telebirr.et');
+      const referenceKeys = ['transactionid', 'txnid', 'reference', 'ref', 'code', 'tx'];
+      if (isTelebirrUrl) referenceKeys.push('id');
+      for (const key of referenceKeys) {
+        const value = url.searchParams.get(key);
+        if (value && /^[A-Za-z0-9_-]{6,64}$/.test(value)) {
+          txId = value;
+          break;
+        }
+      }
+      if (!txId) {
+        const pathMatch = url.pathname.match(/(?:receipt|transaction|payment|txn|ref)\/([A-Za-z0-9_-]{6,64})(?:\/|$)/i);
+        if (pathMatch) txId = pathMatch[1];
+      }
+    } catch {
+      // Continue with SMS parsing when the pasted URL is malformed.
+    }
+  }
+
+  if (!txId) {
+    const labeledMatch = proof.match(
+      /(?:transaction\s*(?:id|no\.?|number|reference)|reference\s*(?:id|no\.?|number)?|trans(?:action)?\s*(?:id|no\.?|number)|የትራንዛክሽን\s*(?:ቁጥር|መለያ))\s*[:#-]?\s*([A-Z0-9][A-Z0-9_-]{5,63})/i,
+    );
+    const providerCodeMatch = proof.match(/\b((?:CW|TXN|TID)[A-Z0-9_-]{5,61})\b/i);
+    txId = labeledMatch?.[1] || providerCodeMatch?.[1] || null;
+  }
+
+  const amountMatch = proof.match(
+    /(?:amount|transferred|transaction(?:\s+of)?|paid|የተላለፈው\s*መጠን)\s*[:：]?\s*(?:ETB|BIRR|ብር)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:ETB|BIRR|ብር)?/i,
+  ) || proof.match(
+    /([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*(?:ETB|BIRR|ብር)/i,
+  ) || proof.match(
+    /(?:ETB|BIRR|ብር)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i,
+  );
+  const amountText = amountMatch?.[1]?.replace(/,/g, '') || null;
+  return {
+    txId: txId ? txId.toUpperCase() : null,
+    amount: amountText ? validDepositAmount(amountText) : null,
+  };
+}
+
+function getDepositInstructionMessage(amount = null, lang = 'en') {
+  const formattedAmount = amount ? `${formatAmount(amount)} BIRR` : 'your chosen amount';
+  const amharicAmount = amount ? `${formatAmount(amount)} ብር` : 'የመረጡትን መጠን';
+  const localized = lang === 'am'
+    ? `💵 የገንዘብ ማስገቢያ · Deposit\n\n` +
+      `ቢያንስ ${minimumDeposit} ብር ወደ ዚህ ቴሌብር ሂሳብ ይላኩ፦\n` +
+      `📱 ስልክ: ${DEPOSIT_CONFIG.telebirrPhone}\n` +
+      `👤 የሂሳብ ስም: ${DEPOSIT_CONFIG.telebirrName}\n\n` +
+      `ከከፈሉ በኋላ የሚከፈለውን መጠን (${amharicAmount}) ያስገቡ፤ ከዚያም የግብይት ሊንኩን ወይም ሙሉውን የSMS መልዕክት እዚህ ይላኩ።\n\n` +
+      `ጥያቄው በአስተዳዳሪ ከተረጋገጠ በኋላ ብቻ ሂሳብዎ ገቢ ይደረጋል።`
+    : `💵 Deposit · የገንዘብ ማስገቢያ\n\n` +
+      `Send at least ${minimumDeposit} BIRR to this Telebirr account:\n` +
+      `📱 Phone / ስልክ: ${DEPOSIT_CONFIG.telebirrPhone}\n` +
+      `👤 Account name / የሂሳብ ስም: ${DEPOSIT_CONFIG.telebirrName}\n\n` +
+      `After payment, enter the exact amount (${formattedAmount}), then send either the transaction link from your SMS or the full SMS text here.\n\n` +
+      `Your wallet is credited only after an administrator verifies the payment.`;
+  return localized;
+}
+
 function formatAmount(value) {
   return minorUnitsToDecimal(decimalToMinorUnits(value));
 }
@@ -1365,8 +1439,11 @@ async function reviewWithdrawal(id, decision, adminId, reason = '') {
 }
 
 async function createDepositRequest(telegramUser, method, amountInput, providerReferenceInput) {
-  const amount = validDepositAmount(amountInput);
-  const providerReference = typeof providerReferenceInput === 'string' ? providerReferenceInput.trim() : '';
+  const parsedProof = parseTelebirrProof(providerReferenceInput);
+  const submittedAmount = typeof amountInput === 'string' ? amountInput.trim() : String(amountInput ?? '').trim();
+  const amount = submittedAmount ? validDepositAmount(submittedAmount) : parsedProof.amount;
+  const providerReference = parsedProof.txId
+    || (typeof providerReferenceInput === 'string' ? providerReferenceInput.trim() : '');
   const configuredMethod = config.paymentMethods.find((item) => item.method === method);
   if (!configuredMethod) {
     throw Object.assign(new Error('That deposit method is not configured.'), { status: 400 });
@@ -1377,7 +1454,13 @@ async function createDepositRequest(telegramUser, method, amountInput, providerR
       { status: 400, code: 'MINIMUM_DEPOSIT_20_BIRR' },
     );
   }
-  if (!amount || providerReference.length < 3 || providerReference.length > 128 ||
+  if (parsedProof.amount && amount && parsedProof.amount !== amount) {
+    throw Object.assign(
+      new Error(`The amount in the Telebirr proof (${parsedProof.amount} BIRR) does not match the submitted amount (${amount} BIRR).`),
+      { status: 400, code: 'DEPOSIT_AMOUNT_MISMATCH' },
+    );
+  }
+  if (!amount || !providerReference || providerReference.length < 3 || providerReference.length > 128 ||
       /[\u0000-\u001f\u007f]/.test(providerReference)) {
     throw Object.assign(new Error('Provide a positive amount (up to two decimals) and a valid transaction reference.'), { status: 400 });
   }
@@ -1855,7 +1938,7 @@ async function sendDepositChoices(chatId, lang) {
   }
   return telegramApi('sendMessage', {
     chat_id: chatId,
-    text: text[lang].choosePaymentMethod,
+    text: `${text[lang].choosePaymentMethod}\n\n${getDepositInstructionMessage(null, lang)}`,
     reply_markup: {
       inline_keyboard: config.paymentMethods.map((method) => [{
         text: method.label,
@@ -2100,7 +2183,10 @@ async function handleUserFlow(message, user, lang) {
       return true;
     }
     await setUserFlow(user.id, 'deposit', 'reference', { method: flow.data.method, amount });
-    await telegramApi('sendMessage', { chat_id: message.chat.id, text: text[lang].enterDepositReference });
+    await telegramApi('sendMessage', {
+      chat_id: message.chat.id,
+      text: `${getDepositInstructionMessage(amount, lang)}\n\n${text[lang].enterDepositReference}`,
+    });
     return true;
   }
   if (flow.flow === 'deposit' && flow.step === 'reference') {
@@ -4357,6 +4443,7 @@ app.get('/api/me', authenticatedTelegramUser, async (req, res, next) => {
 
 app.get('/api/deposit-options', authenticatedTelegramUser, async (_req, res) => {
   res.json({
+    minimumDeposit,
     methods: config.paymentMethods.map(({ method, label, account, accountName }) => ({
       method, label, account, accountName,
     })),
@@ -4738,7 +4825,7 @@ app.post('/telegram/webhook', async (req, res, next) => {
           await telegramApi('answerCallbackQuery', { callback_query_id: callback.id });
           await telegramApi('sendMessage', {
             chat_id: callback.message.chat.id,
-            text: `${option.label}\n${option.accountName}\n${option.account}\n\n${text[lang].enterDepositAmount}`,
+            text: `${getDepositInstructionMessage(null, lang)}\n\n${text[lang].enterDepositAmount}`,
             reply_markup: {
               inline_keyboard: [[{ text: '❌ Cancel', callback_data: 'flow:cancel' }]],
             },
@@ -5164,7 +5251,7 @@ const miniAppHtml = `<!doctype html>
     header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:8px 0 22px}.brand{font-size:13px;letter-spacing:.16em;font-weight:800;color:#f7dfa0}.badge{border:1px solid #594523;border-radius:999px;background:#2c2316;padding:9px 13px;color:var(--gold);font-weight:700;font-size:14px;white-space:nowrap}
     .hero{border:1px solid #493769;border-radius:24px;padding:25px 21px;background:linear-gradient(135deg,#39245b,#211936 65%,#251b34);box-shadow:0 18px 48px #07050c80}.eyebrow{font-size:12px;letter-spacing:.18em;color:var(--gold);font-weight:800}.hero h1{font-size:clamp(27px,8vw,40px);line-height:1.1;margin:10px 0}.hero p,.muted{color:var(--muted)}.hero p{margin:8px 0 0}
     .section{margin-top:24px}.section h2{font-size:18px;margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px}.tile{min-height:92px;text-align:left;border:1px solid var(--line);border-radius:17px;padding:15px;background:#1a1428;color:#fff;font:inherit;font-weight:700}.tile span{display:block;font-size:23px;margin-bottom:7px}.tile:active,.primary:active{transform:scale(.985)}.primary{width:100%;border:0;border-radius:15px;background:linear-gradient(110deg,#ffdf72,#edb92d);color:#241704;font:inherit;font-weight:800;padding:15px;margin-top:17px;cursor:pointer}
-    .panel{border:1px solid var(--line);border-radius:17px;padding:16px;background:#171225}.notice{color:var(--muted);font-size:14px}.error{color:#ffaaaa}.tabs{display:flex;gap:7px;margin-top:22px}.tab{flex:1;border:1px solid var(--line);border-radius:12px;padding:10px 5px;background:#171225;color:#d8d0e6;font:inherit;font-size:13px}.tab.active{border-color:#b08a34;color:var(--gold);background:#282019}.hidden{display:none}.row{display:flex;justify-content:space-between;gap:10px}.retry{margin-top:12px;border:1px solid #705932;border-radius:10px;padding:9px 14px;background:#2a2217;color:var(--gold);font:inherit}label{display:block;margin:12px 0 6px;font-size:14px;color:#e5deef}select,input{width:100%;border:1px solid var(--line);border-radius:11px;padding:12px;background:#100c1d;color:#fff;font:inherit}select:focus,input:focus{outline:2px solid #b08a34}
+    .panel{border:1px solid var(--line);border-radius:17px;padding:16px;background:#171225}.notice{color:var(--muted);font-size:14px}.error{color:#ffaaaa}.tabs{display:flex;gap:7px;margin-top:22px}.tab{flex:1;border:1px solid var(--line);border-radius:12px;padding:10px 5px;background:#171225;color:#d8d0e6;font:inherit;font-size:13px}.tab.active{border-color:#b08a34;color:var(--gold);background:#282019}.hidden{display:none}.row{display:flex;justify-content:space-between;gap:10px}.retry{margin-top:12px;border:1px solid #705932;border-radius:10px;padding:9px 14px;background:#2a2217;color:var(--gold);font:inherit}label{display:block;margin:12px 0 6px;font-size:14px;color:#e5deef}    select,input,textarea{width:100%;border:1px solid var(--line);border-radius:11px;padding:12px;background:#100c1d;color:#fff;font:inherit}select:focus,input:focus,textarea:focus{outline:2px solid #b08a34}textarea{resize:vertical}
   </style>
 </head>
 <body>
@@ -5193,7 +5280,7 @@ const miniAppHtml = `<!doctype html>
         <label for="depositAmount" data-i18n="depositAmount">Amount (BIRR)</label>
         <input id="depositAmount" inputmode="decimal" autocomplete="off" placeholder="e.g. 100.00" required>
         <label for="depositReference" data-i18n="transactionReference">Transaction/reference ID</label>
-        <input id="depositReference" maxlength="128" autocomplete="off" required>
+        <textarea id="depositReference" maxlength="4096" rows="4" autocomplete="off" required></textarea>
         <button class="primary" id="submitDeposit" type="submit" data-i18n="submitDeposit">Submit for review</button>
       </form>
       <p id="depositResult" class="notice" role="status" aria-live="polite"></p>
@@ -5214,6 +5301,7 @@ const miniAppHtml = `<!doctype html>
   const depositSelect = document.getElementById('depositMethod');
   const paymentDetails = document.getElementById('paymentDetails');
   let paymentMethods = [];
+  let minimumDepositAmount = '20.00';
   const translations = {
     en: {
       eyebrow: 'YOUR NEXT GAME STARTS HERE', tagline: 'Play together. Feel the excitement.', openBingo: 'Open Bingo',
@@ -5225,12 +5313,12 @@ const miniAppHtml = `<!doctype html>
       walletInfo: 'Your balance is read from the same TiDB wallet used by the bot. Deposits require admin approval. Use the Telegram bot menu for withdrawals.',
       retry: 'Retry wallet', historyInfo: 'No financial or game history service has been configured.',
       depositTitle: 'Add funds',
-      depositInstructions: 'Make the payment to the account shown below, then enter its transaction reference. Your wallet is credited only after an administrator approves it.',
+      depositInstructions: 'Telebirr deposit · Send your chosen amount (minimum 20 BIRR) to the recipient shown below. Then paste the transaction link or the full Telebirr SMS. Your wallet is credited only after an administrator verifies the payment.',
       depositUnavailable: 'Deposits are not configured yet.',
       paymentMethod: 'Payment method', depositAmount: 'Amount (BIRR)',
-      transactionReference: 'Transaction/reference ID', submitDeposit: 'Submit for review',
-      amountPlaceholder: 'e.g. 100.00', referencePlaceholder: 'Enter the reference from your payment',
-      accountDetails: (method, name, account) => method + ' · ' + name + ' · ' + account,
+      transactionReference: 'Paste transaction link or full SMS', submitDeposit: 'Submit for review',
+      amountPlaceholder: 'e.g. 100.00', referencePlaceholder: 'Paste the Telebirr transaction link or full SMS',
+      accountDetails: (method, name, account, minimum) => method + ' · Send to ' + account + ' · ' + name + ' · Minimum ' + minimum + ' BIRR. After payment, paste the transaction link or full SMS.',
       depositSubmitted: id => 'Request #' + id + ' is pending admin review. Your wallet has not been credited yet.',
       depositAdminRetry: ' The request is saved, but admin notification failed. Admin can run /pendingdeposits.',
       depositFailed: 'Could not submit deposit request.',
@@ -5249,12 +5337,12 @@ const miniAppHtml = `<!doctype html>
       walletInfo: 'ቀሪ ሂሳቡ ቦቱ ከሚጠቀምበት ተመሳሳይ TiDB የኪስ ቦርሳ ይነበባል። ገንዘብ ማስገባት የአስተዳዳሪ ፈቃድ ይፈልጋል። ለማውጣት የቴሌግራም ቦት ሜኑን ይጠቀሙ።',
       retry: 'እንደገና ሞክር', historyInfo: 'የገንዘብ ወይም የጨዋታ ታሪክ አገልግሎት ገና አልተዘጋጀም።',
       depositTitle: 'ገንዘብ ጨምር',
-      depositInstructions: 'ከታች ወደሚታየው ሂሳብ ክፍያ ይፈጽሙና የግብይት መለያውን ያስገቡ። አስተዳዳሪ ካጸደቀው በኋላ ብቻ ወደ ኪስ ቦርሳዎ ይጨመራል።',
+      depositInstructions: 'የቴሌብር ገንዘብ ማስገቢያ · የመረጡትን መጠን (ቢያንስ 20 ብር) ከታች ወደሚታየው ሂሳብ ይላኩ። ከዚያ የግብይት ሊንኩን ወይም ሙሉውን የቴሌብር SMS ይለጥፉ። ክፍያው በአስተዳዳሪ ከተረጋገጠ በኋላ ብቻ ሂሳብዎ ገቢ ይደረጋል።',
       depositUnavailable: 'የገንዘብ ማስገባት አገልግሎት ገና አልተዘጋጀም።',
       paymentMethod: 'የክፍያ ዘዴ', depositAmount: 'መጠን (ብር)',
-      transactionReference: 'የግብይት መለያ', submitDeposit: 'ለግምገማ ላክ',
-      amountPlaceholder: 'ምሳሌ፦ 100.00', referencePlaceholder: 'ከክፍያዎ የግብይት መለያ ያስገቡ',
-      accountDetails: (method, name, account) => method + ' · ' + name + ' · ' + account,
+      transactionReference: 'የግብይት ሊንኩን ወይም ሙሉውን SMS ይለጥፉ', submitDeposit: 'ለግምገማ ላክ',
+      amountPlaceholder: 'ምሳሌ፦ 100.00', referencePlaceholder: 'የቴሌብር ግብይት ሊንክ ወይም ሙሉውን SMS ይለጥፉ',
+      accountDetails: (method, name, account, minimum) => method + ' · ወደ ' + account + ' ይላኩ · ' + name + ' · ዝቅተኛው ' + minimum + ' ብር። ከከፈሉ በኋላ የግብይት ሊንኩን ወይም ሙሉውን SMS ይለጥፉ።',
       depositSubmitted: id => 'ጥያቄ #' + id + ' የአስተዳዳሪ ግምገማ እየጠበቀ ነው። ገንዘብ ገና ወደ ኪስ ቦርሳዎ አልተጨመረም።',
       depositAdminRetry: ' ማስታወቂያው አልደረሰም፤ አስተዳዳሪው /pendingdeposits ማስኬድ ይችላል።',
       depositFailed: 'የገንዘብ ማስገቢያ ጥያቄውን መላክ አልተቻለም።',
@@ -5291,7 +5379,7 @@ const miniAppHtml = `<!doctype html>
     const selected = paymentMethods.find(method => method.method === depositSelect.value);
     const copy = translations[currentLanguage];
     paymentDetails.textContent = selected
-      ? copy.accountDetails(selected.label, selected.accountName, selected.account)
+      ? copy.accountDetails(selected.label, selected.accountName, selected.account, minimumDepositAmount)
       : copy.loadingOptions;
   }
   document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => {
@@ -5340,6 +5428,7 @@ const miniAppHtml = `<!doctype html>
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Could not load payment methods');
       paymentMethods = data.methods;
+      minimumDepositAmount = data.minimumDeposit || '20.00';
       depositSelect.replaceChildren();
       for (const method of paymentMethods) {
         const option = document.createElement('option');
